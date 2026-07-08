@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>榫合万象 - 平面古建营造交互作品</title>
+  <style>
+    /* === 基础重置 === */
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: "Noto Serif SC", "PingFang SC", "Microsoft YaHei", serif;
+      background: #2b2118;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+    }
+
+    /* === 摄像头背景层 === */
+    #camera-layer {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      z-index: 1;
+    }
+    #camera-video {
+      width: 100vw; height: 100vh;
+      object-fit: cover;
+      opacity: 0.25;
+      filter: sepia(0.3) contrast(1.1);
+      transform: scaleX(-1); /* 左右翻转摄像头画面 */
+    }
+
+    /* === 主画布层 === */
+    #main-canvas {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      z-index: 2;
+    }
+
+    /* === UI层 === */
+    #ui-layer {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      z-index: 10;
+      pointer-events: none;
+    }
+    #ui-layer > * { pointer-events: auto; }
+
+    /* 标题 */
+    .title-bar {
+      position: absolute;
+      top: 20px; left: 50%;
+      transform: translateX(-50%);
+      text-align: center;
+      color: #d4c9b8;
+    }
+    .title-bar h1 {
+      font-size: 1.8rem;
+      letter-spacing: 0.3em;
+      font-weight: 700;
+      text-shadow: 0 2px 8px rgba(0,0,0,0.6);
+    }
+    .title-bar p {
+      font-size: 0.85rem;
+      color: #8c7e6d;
+      margin-top: 4px;
+      letter-spacing: 0.1em;
+    }
+
+    /* 营造值面板 */
+    .score-panel {
+      position: absolute;
+      top: 20px; right: 24px;
+      background: rgba(43, 33, 24, 0.85);
+      border: 1px solid #5c4033;
+      border-radius: 8px;
+      padding: 12px 20px;
+      color: #d4c9b8;
+      min-width: 140px;
+    }
+    .score-panel .label {
+      font-size: 0.75rem;
+      color: #8c7e6d;
+      margin-bottom: 4px;
+    }
+    .score-panel .value {
+      font-size: 1.6rem;
+      font-weight: 700;
+      color: #c4a574;
+    }
+
+    /* 阶段教程面板 */
+    .guide-panel {
+      position: absolute;
+      top: 80px; left: 20px;
+      background: rgba(43, 33, 24, 0.85);
+      border: 1px solid #5c4033;
+      border-radius: 8px;
+      padding: 12px 16px;
+      color: #d4c9b8;
+      max-width: 200px;
+      font-size: 0.8rem;
+      line-height: 1.7;
+    }
+    .guide-panel .stage-title {
+      font-size: 0.9rem;
+      font-weight: 700;
+      color: #c4a574;
+      margin-bottom: 6px;
+      letter-spacing: 0.1em;
+    }
+    .guide-panel .task {
+      color: #d4c9b8;
+      margin-bottom: 8px;
+    }
+    .guide-panel .divider {
+      border: none;
+      border-top: 1px solid #5c4033;
+      margin: 8px 0;
+    }
+    .guide-panel .controls {
+      font-size: 0.75rem;
+      color: #8c7e6d;
+    }
+    .guide-panel .controls strong {
+      color: #a08060;
+    }
+
+    /* 底部按钮栏 */
+    .bottom-bar {
+      position: absolute;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 12px;
+    }
+    .btn {
+      background: rgba(43, 33, 24, 0.9);
+      border: 1px solid #8b7355;
+      color: #d4c9b8;
+      padding: 10px 24px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 0.9rem;
+      transition: all 0.2s;
+      letter-spacing: 0.05em;
+    }
+    .btn:hover {
+      background: #5c4033;
+      border-color: #c4a574;
+      color: #fff;
+    }
+    .btn.primary {
+      background: #8b4513;
+      border-color: #a0522d;
+      color: #fff;
+    }
+    .btn.primary:hover {
+      background: #a0522d;
+    }
+
+    /* 提示信息 */
+    .hint-box {
+      position: absolute;
+      bottom: 80px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(43, 33, 24, 0.9);
+      border: 1px solid #5c4033;
+      border-radius: 8px;
+      padding: 12px 24px;
+      color: #d4c9b8;
+      font-size: 0.9rem;
+      max-width: 600px;
+      text-align: center;
+      opacity: 0;
+      transition: opacity 0.5s;
+      word-wrap: break-word;
+      white-space: normal;
+      line-height: 1.6;
+      overflow-wrap: break-word;
+    }
+    .hint-box.show { opacity: 1; }
+
+    /* 启动遮罩 */
+    #start-overlay {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      background: rgba(43, 33, 24, 0.95);
+      z-index: 100;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      pointer-events: auto;
+    }
+    #start-overlay h2 {
+      color: #c4a574;
+      font-size: 2rem;
+      letter-spacing: 0.3em;
+      margin-bottom: 12px;
+    }
+    #start-overlay p {
+      color: #8c7e6d;
+      font-size: 1rem;
+      margin-bottom: 32px;
+      text-align: center;
+      line-height: 1.8;
+    }
+    #start-overlay .start-btn {
+      background: #8b4513;
+      color: #fff;
+      border: none;
+      padding: 14px 48px;
+      font-size: 1.1rem;
+      border-radius: 8px;
+      cursor: pointer;
+      font-family: inherit;
+      letter-spacing: 0.2em;
+      transition: background 0.3s;
+    }
+    #start-overlay .start-btn:hover {
+      background: #a0522d;
+    }
+
+    /* 手势指示器 */
+    #hand-cursor {
+      position: absolute;
+      width: 24px; height: 24px;
+      border: 2px solid #c4a574;
+      border-radius: 50%;
+      background: rgba(196, 165, 116, 0.3);
+      transform: translate(-50%, -50%);
+      pointer-events: none;
+      z-index: 20;
+      display: none;
+      transition: width 0.15s, height 0.15s;
+    }
+    #hand-cursor.pinching {
+      width: 16px; height: 16px;
+      background: rgba(196, 165, 116, 0.6);
+      border-color: #e8c97a;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- 启动遮罩 -->
+  <div id="start-overlay">
+    <h2>榫合万象</h2>
+    <p>
+      先拼榫卯成梁，再立柱架阁——体验传统木构搭建<br>
+      摄像头仅用于本地手势识别，视频不会上传
+    </p>
+    <button class="start-btn" onclick="startApp()">开启体验</button>
+  </div>
+
+  <!-- 摄像头层 -->
+  <div id="camera-layer">
+    <video id="camera-video" autoplay playsinline muted></video>
+  </div>
+
+  <!-- 主画布 -->
+  <canvas id="main-canvas"></canvas>
+
+  <!-- 手势光标 -->
+  <div id="hand-cursor"></div>
+
+  <!-- UI层 -->
+  <div id="ui-layer">
+    <!-- 阶段教程面板（左上角） -->
+    <div class="guide-panel" id="guide-panel">
+      <div class="controls" style="margin-bottom: 6px; color: #a08060;">
+        捏合/点击构件可查看介绍
+      </div>
+      <div class="stage-title" id="guide-stage">阶段一</div>
+      <div class="task" id="guide-task">请将燕尾榫拖向燕尾卯完成嵌合</div>
+      <hr class="divider">
+      <div class="controls">
+        <strong>手势：</strong>食指拇指捏合拖拽<br>
+        <strong>鼠标：</strong>按住左键拖拽
+      </div>
+    </div>
+
+    <div class="title-bar">
+      <h1>榫合万象</h1>
+      <p>平面古建营造交互作品</p>
+    </div>
+
+    <div class="score-panel">
+      <div class="label">营造值</div>
+      <div class="value" id="score-value">0</div>
+    </div>
+
+    <div class="bottom-bar">
+      <button class="btn" onclick="resetBuild()">重置</button>
+      <button class="btn" onclick="toggleGuide()">营造图鉴</button>
+      <button class="btn primary" id="btn-phase2" style="display:none" onclick="initPhase2()">自由搭建</button>
+      <button class="btn primary" onclick="exportSVG()">导出插画</button>
+    </div>
+
+    <div class="hint-box" id="hint-box"></div>
+  </div>
+
+  <!-- 脚本 -->
+  <!-- MediaPipe Hands 从 CDN 加载（减小仓库体积） -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1675466862/camera_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils@0.3.1675466124/drawing_utils.js" crossorigin="anonymous"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
