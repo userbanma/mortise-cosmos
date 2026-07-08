@@ -123,7 +123,8 @@ async function initMediaPipe() {
   // 初始化 Hands
   App.hands = new Hands({
     locateFile: (file) => {
-      return `lib/mediapipe/${file}`;
+      // 从 CDN 加载 MediaPipe 模型文件（无需本地 lib/ 目录）
+      return `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${file}`;
     }
   });
 
