@@ -1,59 +1,3 @@
-/**
- * 榫合万象 - 主应用逻辑
- * 阶段一：基础环境 + 摄像头 + 画布初始化
- */
-
-// ========== 全局状态 ==========
-const App = {
-  canvas: null,
-  ctx: null,
-  width: 0,
-  height: 0,
-  video: null,
-  cameraActive: false,
-
-  // 交互状态
-  hand: { x: 0, y: 0, pinching: false, visible: false, wasPinching: false },
-  mouse: { x: 0, y: 0, down: false },
-  useMouse: false, // 默认使用手势，手势不可见时回退到鼠标
-
-  // MediaPipe
-  hands: null,
-  camera: null,
-
-  // 构件系统
-  components: [],
-  draggingComponent: null,
-  hoverComponent: null,
-  dragOffset: { x: 0, y: 0 },
-  dragGroupOffset: {}, // 组内各构件相对于拖拽构件的偏移
-
-  // 构件组系统（搭建建筑用）
-  groups: {}, // { groupId: [compId1, compId2, ...] }
-  nextGroupId: 1,
-
-  // 营造系统
-  score: 0,
-  matchedPairs: [],
-  unlockedPatterns: [],
-  errorCount: {},
-
-  // 彩画
-  patterns: [],
-
-  // 提示
-  hintTimer: null,
-
-  // 阶段任务系统
-  currentStage: 1,          // 当前阶段 1=引导阶段 2=自由搭建
-  currentTask: 1,           // 阶段一中的子任务 1~3
-  task1Done: false,         // 任务一：燕尾榫×燕尾卯嵌合
-  task2Done: false,         // 任务二：直榫×直卯嵌合
-  task3Done: false,         // 任务三：立柱
-  phase1Done: false,        // 阶段一全部完成
-  phase2Done: false,        // 阶段二完成（全部构件用完）
-};
-
 // ========== 初始化 ==========
 function init() {
   App.canvas = document.getElementById('main-canvas');
@@ -66,6 +10,7 @@ function init() {
   // 初始化构件（阶段三会详细展开）
   initComponents();
   initPatterns();
+  initPaintPalette();
 
   // 绑定鼠标事件（阶段二会加入手势）
   bindMouseEvents();
@@ -102,256 +47,6 @@ async function startApp() {
   }
 }
 
-// ========== MediaPipe 手势识别初始化 ==========
-async function initMediaPipe() {
-  // 检查 MediaPipe 是否加载
-  if (typeof Hands === 'undefined') {
-    throw new Error('MediaPipe Hands 库未加载');
-  }
-
-  // 先手动启动摄像头
-  const stream = await navigator.mediaDevices.getUserMedia({
-    video: { width: 1280, height: 720, facingMode: 'user' }
-  });
-  App.video.srcObject = stream;
-  await new Promise(resolve => {
-    App.video.onloadedmetadata = () => resolve();
-  });
-  await App.video.play();
-  App.cameraActive = true;
-
-  // 初始化 Hands
-  App.hands = new Hands({
-    locateFile: (file) => {
-      // 从 CDN 加载 MediaPipe 模型文件（无需本地 lib/ 目录）
-      return `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${file}`;
-    }
-  });
-
-  App.hands.setOptions({
-    maxNumHands: 1,
-    modelComplexity: 1,
-    minDetectionConfidence: 0.5,
-    minTrackingConfidence: 0.5,
-    selfieMode: false  // 关闭自拍镜像，由CSS统一控制画面翻转
-  });
-
-  App.hands.onResults(onHandsResults);
-
-  // 使用 requestAnimationFrame 循环发送视频帧给 Hands
-  // 添加 processing 标志防止并发调用导致 WASM 崩溃
-  let processing = false;
-  async function sendFrame() {
-    if (!processing && App.cameraActive && App.video.readyState >= 2) {
-      processing = true;
-      try {
-        await App.hands.send({ image: App.video });
-      } catch (err) {
-        console.error('MediaPipe send error:', err);
-      }
-      processing = false;
-    }
-    requestAnimationFrame(sendFrame);
-  }
-  sendFrame();
-
-  showHint('【阶段一 · 任务一】请将燕尾榫拖向燕尾卯完成嵌合。其余构件已锁定。');
-  console.log('[MediaPipe] 手势识别已初始化，请举起手测试');
-}
-
-// ========== 手势坐标映射（补偿 object-fit:cover 裁剪） ==========
-// object-fit:cover 会保持视频比例并裁剪超出部分来填满容器
-// MediaPipe 返回的坐标是基于完整视频帧的 (0-1)，需要映射到屏幕坐标
-function mapHandToScreen(normX, normY) {
-  const vw = App.video.videoWidth || 1280;
-  const vh = App.video.videoHeight || 720;
-
-  // 视频原始宽高比
-  const videoRatio = vw / vh;
-  // 屏幕宽高比
-  const screenRatio = App.width / App.height;
-
-  let offsetX = 0, offsetY = 0, renderW = App.width, renderH = App.height;
-
-  if (videoRatio > screenRatio) {
-    // 视频比屏幕宽 → 左右被裁剪
-    renderH = App.height;
-    renderW = App.height * videoRatio;
-    offsetX = (App.width - renderW) / 2;
-  } else {
-    // 视频比屏幕高 → 上下被裁剪
-    renderW = App.width;
-    renderH = App.width / videoRatio;
-    offsetY = (App.height - renderH) / 2;
-  }
-
-  // 先映射到 cover 渲染区域内的像素坐标
-  const px = offsetX + normX * renderW;
-  const py = offsetY + normY * renderH;
-
-  // CSS scaleX(-1) 翻转，x 坐标需要镜像
-  const screenX = App.width - px;
-  const screenY = py;
-
-  return { x: screenX, y: screenY };
-}
-
-// ========== MediaPipe 结果回调 ==========
-function onHandsResults(results) {
-  if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
-    const landmarks = results.multiHandLandmarks[0];
-    const indexTip = landmarks[8];   // 食指指尖
-    const thumbTip = landmarks[4];   // 拇指指尖
-
-    // 调试：首次检测到手时打印日志
-    if (!App.hand.visible) {
-      console.log('[MediaPipe] 检测到手，食指原始坐标:', indexTip.x.toFixed(3), indexTip.y.toFixed(3));
-    }
-
-    // MediaPipe 返回基于视频原始尺寸的归一化坐标 (0-1)
-    // 需要补偿 object-fit:cover 裁剪带来的偏移
-    const mapped = mapHandToScreen(indexTip.x, indexTip.y);
-    const x = mapped.x;
-    const y = mapped.y;
-
-    // 计算捏合距离（食指与拇指的屏幕距离）
-    const thumbMapped = mapHandToScreen(thumbTip.x, thumbTip.y);
-    const pinchDist = Math.hypot(x - thumbMapped.x, y - thumbMapped.y);
-    const isPinching = pinchDist < 40; // 40像素阈值
-
-    App.hand.x = x;
-    App.hand.y = y;
-    App.hand.pinching = isPinching;
-    App.hand.visible = true;
-    App.useMouse = false; // 手势可见时优先使用手势
-
-    // 将手势事件转换为交互事件
-    if (isPinching && !App.hand.wasPinching) {
-      triggerPointerDown(x, y);
-    } else if (isPinching && App.hand.wasPinching) {
-      triggerPointerMove(x, y);
-    } else if (!isPinching && App.hand.wasPinching) {
-      triggerPointerUp();
-    }
-
-    App.hand.wasPinching = isPinching;
-
-    // 更新手势光标
-    updateHandCursor(x, y, isPinching);
-  } else {
-    // 手消失时，如果正在拖拽则释放
-    if (App.hand.wasPinching) {
-      triggerPointerUp();
-      App.hand.wasPinching = false;
-    }
-    App.hand.visible = false;
-    App.useMouse = true; // 回退到鼠标
-  }
-}
-
-// ========== 构件初始化 ==========
-function initComponents() {
-  const cx = App.width / 2;
-  const cy = App.height / 2;
-
-  App.components = [
-    {
-      id: 'zhitui_01', name: '直榫', type: 'tenon',
-      category: '柱枋节点',
-      x: cx - 200, y: cy,
-      width: 120, height: 50,
-      rotation: 0,
-      matched: false,
-      unlocks: ['hexi_01'],
-      description: '直榫是最基础的榫卯形式，榫头呈长方体，垂直插入卯眼，主要用于柱与枋的垂直连接。受力方向以压力为主。',
-      briefNote: '始于商周，最古之榫。直来直往，承托千秋。',
-      origin: '直榫见于商代青铜器的木范结构，是华夏榫卯之滥觞。《营造法式》称其为"直项"，为万榫之母。',
-      rules: {
-        mateWith: ['maoyan_01'],
-        tolerance: 80,
-        angleTolerance: 15
-      },
-      color: '#8b7355',
-      groupId: null
-    },
-    {
-      id: 'maoyan_01', name: '卯眼', type: 'mortise',
-      category: '柱枋节点',
-      x: cx + 200, y: cy,
-      width: 120, height: 50,
-      rotation: 0,
-      matched: false,
-      unlocks: ['hexi_01'],
-      description: '卯眼是榫头的承接部位，凿于构件端部或侧面，与榫头配合形成稳固节点。',
-      briefNote: '藏榫之所，纳木之怀。有容乃大，不露锋芒。',
-      origin: '卯字本义为"冒"，取覆盖之意。《考工记》载匠人凿卯"深不过榫之半"，暗合中庸之道。',
-      rules: {
-        mateWith: ['zhitui_01'],
-        tolerance: 80,
-        angleTolerance: 15
-      },
-      color: '#6b5a45',
-      groupId: null
-    },
-    {
-      id: 'yanwei_01', name: '燕尾榫', type: 'tenon',
-      category: '梁柱节点',
-      x: cx - 200, y: cy + 120,
-      width: 140, height: 55,
-      rotation: 0,
-      matched: false,
-      unlocks: ['xuanzi_01'],
-      description: '燕尾榫因形似燕尾而得名，榫头根部窄、端部宽，受拉力时越拉越紧，常用于梁柱水平连接。斜面比例通常为1:6。',
-      briefNote: '形如燕尾，入木三分。愈拉愈紧，牢不可破。',
-      origin: '燕尾榫古称"银锭榫"，兴于唐宋。《鲁班经》称其"拉不断、扯不开"，为抗拉节点之王。',
-      rules: {
-        mateWith: ['yanwei_mao_01'],
-        tolerance: 90,
-        angleTolerance: 15
-      },
-      color: '#9c7e5e',
-      groupId: null
-    },
-    {
-      id: 'yanwei_mao_01', name: '燕尾卯', type: 'mortise',
-      category: '梁柱节点',
-      x: cx + 200, y: cy + 120,
-      width: 140, height: 55,
-      rotation: 0,
-      matched: false,
-      unlocks: ['xuanzi_01'],
-      description: '燕尾卯与燕尾榫配套使用，开口呈梯形，内宽外窄，防止构件脱开。',
-      briefNote: '口阔腹窄，请君入瓮。一入其中，无复他适。',
-      origin: '燕尾卯需逆燕尾之形而凿，匠人谓之"倒插门"。明代建筑中多用于檩条与梁架的连接。',
-      rules: {
-        mateWith: ['yanwei_01'],
-        tolerance: 90,
-        angleTolerance: 15
-      },
-      color: '#7a6548',
-      groupId: null
-    },
-    {
-      id: 'zhu_01', name: '柱', type: 'structure',
-      category: '主体结构',
-      x: cx, y: cy - 150,
-      width: 50, height: 120,
-      rotation: 0,
-      matched: false,
-      unlocks: [],
-      description: '立柱是建筑的垂直承重构件，上承梁架，下接柱础。传统木柱多为整根原木制成，讲究顺纹直材。',
-      briefNote: '木秀于林，风必摧之；柱立于堂，屋必安之。',
-      origin: '柱之称谓始于殷墟。《周礼·考工记》列匠人"宫室之制"，柱为首务。历代木构皆以柱分间架，有"墙倒屋不塌"之说，全靠柱阵承力。',
-      rules: {
-        mateWith: [],
-        tolerance: 0,
-        angleTolerance: 0
-      },
-      color: '#a08060',
-      groupId: null
-    }
-  ];
-}
 
 // ========== 彩画初始化 ==========
 function initPatterns() {
@@ -373,8 +68,48 @@ function initPatterns() {
       description: '旋子彩画因图案呈旋花状而得名，等级次于和玺，广泛用于官式建筑。'
     }
   ];
+
+  // 预加载彩画素材图片
+  App.hexiPatternImg = new Image();
+  App.hexiPatternImg.src = 'assets/hexi_pattern.png';
+  App.xuanziPatternImg = new Image();
+  App.xuanziPatternImg.src = 'assets/xuanzi_pattern.png';
 }
 
+function initPaintPalette() {
+  // 左侧彩画颜料托盘初始化
+  // 始终显示所有颜料，已解锁/未解锁用不同样式标注
+  const itemH = 52;
+  const gap = 10;
+
+  App.paintPalette = [
+    {
+      id: 'paint_hexi',
+      name: '和玺龙纹',
+      patternId: 'hexi_01',
+      color: '#c4a574',
+      displayColor: '#c4a574',
+      x: 20, y: 0,
+      w: 86, h: itemH,
+      unlocked: false,
+      unlockScore: 2,
+      description: '和玺彩画颜料，金线龙纹，青绿底色。拖拽到已嵌合构件上可为其上色。',
+    },
+    {
+      id: 'paint_xuanzi',
+      name: '旋子花纹',
+      patternId: 'xuanzi_01',
+      color: '#8fbc8f',
+      displayColor: '#8fbc8f',
+      x: 20, y: 0,
+      w: 86, h: itemH,
+      unlocked: false,
+      unlockScore: 4,
+      description: '旋子彩画颜料，青绿旋花纹样。拖拽到已嵌合构件上可为其上色。',
+    },
+  ];
+  updatePaintPalettePositions();
+}
 // ========== 鼠标事件 ==========
 function bindMouseEvents() {
   App.canvas.addEventListener('mousedown', onMouseDown);
@@ -439,12 +174,29 @@ function isDraggableInStage(comp) {
     return false;
   } else if (App.currentStage === 2) {
     // 阶段二自由搭建：所有构件都可移动
+    // 但如果开启了搭建引导，只允许引导步骤所需的构件移动
+    if (App.buildGuide && App.buildGuide.stepIds) {
+      return App.buildGuide.stepIds.includes(comp.id);
+    }
     return true;
   }
   return false;
 }
 
 function triggerPointerDown(x, y) {
+  // 先检查是否点中彩画托盘中的颜料（颜料优先级高于构件）
+  const unlockedPaints = App.paintPalette.filter(p => p.unlocked);
+  for (let i = unlockedPaints.length - 1; i >= 0; i--) {
+    const paint = unlockedPaints[i];
+    if (
+      x >= paint.x && x <= paint.x + paint.w &&
+      y >= paint.y && y <= paint.y + paint.h
+    ) {
+      App.draggingPaint = paint;
+      return;
+    }
+  }
+
   // 检查是否点中构件（动画中的不可拖拽，已匹配的组可整体拖拽）
   for (let i = App.components.length - 1; i >= 0; i--) {
     const comp = App.components[i];
@@ -488,6 +240,9 @@ function triggerPointerDown(x, y) {
 }
 
 function triggerPointerMove(x, y) {
+  // 如果正在拖动颜料，不处理构件拖拽
+  if (App.draggingPaint) return;
+
   // 拖拽中（组内成员一起移动）
   if (App.draggingComponent) {
     const newX = x - App.dragOffset.x;
@@ -517,234 +272,72 @@ function triggerPointerMove(x, y) {
 }
 
 function triggerPointerUp() {
-  if (App.draggingComponent) {
-    // 放下时进行匹配检测
-    checkMatchOnRelease(App.draggingComponent);
-  }
-  App.draggingComponent = null;
-}
+  // 无论如何最后都要清除拖拽状态，防止卡住
+  try {
+    // 如果正在拖动颜料，检测是否放到已嵌合构件上
+    if (App.draggingPaint) {
+      const mx = App.useMouse ? App.mouse.x : App.hand.x;
+      const my = App.useMouse ? App.mouse.y : App.hand.y;
+      const paint = App.draggingPaint;
 
-// ========== 碰撞检测 ==========
-function hitTest(comp, x, y) {
-  const halfW = comp.width / 2;
-  const halfH = comp.height / 2;
-  return x >= comp.x - halfW && x <= comp.x + halfW &&
-         y >= comp.y - halfH && y <= comp.y + halfH;
-}
+      // 查找光标下的已嵌合构件
+      let targetComp = null;
+      for (let i = App.components.length - 1; i >= 0; i--) {
+        const comp = App.components[i];
+        if (comp.matched && hitTest(comp, mx, my)) {
+          targetComp = comp;
+          break;
+        }
+      }
 
-// ========== 结构校验 ==========
-function getConnectionPoint(comp) {
-  if (comp.type === 'tenon') {
-    const isDovetail = comp.id.includes('yanwei') || comp.id.includes('yw_');
-    const bodyRight = isDovetail ? comp.width * 0.22 : comp.width * 0.25;
-    const tLen = isDovetail ? comp.width * 0.24 : comp.width * 0.22;
-    return { x: comp.x + bodyRight + tLen, y: comp.y };
-  } else if (comp.type === 'mortise') {
-    return { x: comp.x - comp.width / 2, y: comp.y };
-  }
-  return { x: comp.x, y: comp.y };
-}
+      if (targetComp) {
+        // 给构件上色（设置painted属性和patternId）
+        targetComp.painted = true;
+        targetComp.paintPatternId = paint.patternId;
+        showHint(`【上色】${targetComp.name} 涂上了 ${paint.name}`, 2000);
+      } else {
+        showHint('请将颜料拖到已嵌合的构件上', 1500);
+      }
 
-function checkMatchOnRelease(comp) {
-  // 柱的特殊逻辑：可以吸附到已匹配的组合体上
-  if (comp.type === 'structure') {
-    checkColumnAttach(comp);
-    return;
-  }
-
-  if (!comp.rules || comp.rules.mateWith.length === 0) return;
-
-  for (const other of App.components) {
-    if (other === comp) continue;
-    if (!comp.rules.mateWith.includes(other.id)) continue;
-    if (other.matched) continue;
-
-    // 用连接点距离判断（榫头右端 vs 凹槽左端），更精确
-    const p1 = getConnectionPoint(comp);
-    const p2 = getConnectionPoint(other);
-    const dx = p1.x - p2.x;
-    const dy = p1.y - p2.y;
-    const distance = Math.sqrt(dx * dx + dy * dy);
-    const angleDiff = Math.abs(comp.rotation - other.rotation);
-
-    if (distance <= comp.rules.tolerance && angleDiff <= comp.rules.angleTolerance) {
-      // 匹配成功！
-      snapTogether(comp, other);
-      onMatchSuccess(comp, other);
+      App.draggingPaint = null;
       return;
     }
-  }
 
-  // 匹配失败，记录错误
-  const pairKey = comp.id + '_' + comp.rules.mateWith[0];
-  App.errorCount[pairKey] = (App.errorCount[pairKey] || 0) + 1;
-
-  if (App.errorCount[pairKey] >= 3) {
-    showHint(`【错误示范】${comp.name} 应与对应的卯眼/榫头对齐，注意方向和距离。查看营造图鉴了解更多。`, 4000);
-  } else {
-    showHint(`${comp.name} 未对齐，请靠近对应的构件并调整方向`, 2500);
-  }
-}
-
-// 柱吸附到组合体：形成柱+梁的T型结构
-function checkColumnAttach(column) {
-  let bestGroup = null;
-  let bestDist = Infinity;
-  let bestCenter = null;
-
-  // 寻找最近的已匹配组合体
-  for (const groupId in App.groups) {
-    const memberIds = App.groups[groupId];
-    const members = memberIds.map(id => App.components.find(c => c.id === id)).filter(Boolean);
-    if (members.length === 0) continue;
-    
-    // 计算组合体中心
-    const centerX = members.reduce((s, m) => s + m.x, 0) / members.length;
-    const centerY = members.reduce((s, m) => s + m.y, 0) / members.length;
-    const dist = Math.hypot(column.x - centerX, column.y - centerY);
-    
-    if (dist < bestDist && dist <= 80) {
-      bestDist = dist;
-      bestGroup = groupId;
-      bestCenter = { x: centerX, y: centerY };
+    if (App.draggingComponent) {
+      const comp = App.draggingComponent;
+      let justMatched = false;
+      // 检测是否放入回收区域（阶段二）
+      if (App.currentStage === 2 && isInRecycleArea(comp.x, comp.y)) {
+        App.components = App.components.filter(c => c.id !== comp.id);
+        // 同时从组中移除
+        for (const gid in App.groups) {
+          App.groups[gid] = App.groups[gid].filter(id => id !== comp.id);
+          if (App.groups[gid].length === 0) delete App.groups[gid];
+        }
+        showHint(`【移除】${comp.name} 已回收`, 1500);
+      } else {
+        // 放下时进行匹配检测
+        justMatched = checkMatchOnRelease(comp);
+        // 如果刚发生了新匹配，跳过引导放置检测
+        // 用户需要重新拾起拼好的组合件，拖到虚线框才算完成
+        if (justMatched) {
+          showHint('拼接成功！请拾起拼好的横梁拖到金色虚线框内。', 2500);
+        }
+      }
+      // 检测搭建引导放置
+      // 步骤3跳过（需重新拾起拼好的横梁拖到虚线框）
+      // 步骤4雀替吸附后仍需检测以推进步骤
+      const isStep3 = App.buildGuide && App.buildGuide.step === 3;
+      if (App.buildGuide && !App.buildGuide.completed && !(isStep3 && justMatched)) {
+        checkBuildGuidePlacement(comp);
+      }
     }
+  } catch (e) {
+    console.error('triggerPointerUp error:', e);
   }
-
-  if (bestGroup && bestCenter) {
-    // 柱吸附到组合体中心下方，形成"柱承梁"结构
-    const members = App.groups[bestGroup].map(id => App.components.find(c => c.id === id)).filter(Boolean);
-    const maxY = Math.max(...members.map(m => m.y + m.height/2));
-    const targetX = bestCenter.x;
-    const targetY = maxY + column.height / 2 + 4;
-    animateSnap(column, targetX, targetY);
-    column.rotation = 0;
-    column.matched = true;
-
-    // 把柱加入组
-    column.groupId = bestGroup;
-    App.groups[bestGroup].push(column.id);
-
-    // 阶段一全部完成
-    App.task3Done = true;
-    App.phase1Done = true;
-
-    App.score += 1;
-    updateScoreDisplay();
-    updateGuidePanel();
-    showHint(`【立柱】${column.name} 已立于梁下！一柱承梁，万事始兴。`, 4000);
-    checkPatternUnlock();
-
-    // 显示自由搭建按钮
-    const btn = document.getElementById('btn-phase2');
-    if (btn) btn.style.display = 'inline-block';
-
-    setTimeout(() => {
-      showHint('【阶段一完成】恭喜！点击底部"自由搭建"开始自由营造。', 6000);
-    }, 4500);
-  }
+  App.draggingComponent = null;
+  App.draggingPaint = null;
 }
-
-// ========== 嵌合动画系统 ==========
-const Animations = [];
-
-function animateSnap(comp, targetX, targetY) {
-  comp.animating = true;
-  comp.animStartX = comp.x;
-  comp.animStartY = comp.y;
-  comp.animTargetX = targetX;
-  comp.animTargetY = targetY;
-  comp.animStartTime = performance.now();
-  comp.animDuration = 400; // 毫秒
-  Animations.push(comp);
-}
-
-function updateAnimations() {
-  const now = performance.now();
-  for (let i = Animations.length - 1; i >= 0; i--) {
-    const comp = Animations[i];
-    const elapsed = now - comp.animStartTime;
-    const progress = Math.min(elapsed / comp.animDuration, 1);
-    
-    // easeOutBack 缓动：先冲过头再弹回，模拟咔嗒感
-    const easeOutBack = (t) => {
-      const c1 = 1.70158;
-      const c3 = c1 + 1;
-      return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2);
-    };
-    
-    const eased = easeOutBack(progress);
-    comp.x = comp.animStartX + (comp.animTargetX - comp.animStartX) * eased;
-    comp.y = comp.animStartY + (comp.animTargetY - comp.animStartY) * eased;
-    
-    if (progress >= 1) {
-      comp.animating = false;
-      Animations.splice(i, 1);
-    }
-  }
-}
-
-function snapTogether(a, b) {
-  const tenon = a.type === 'tenon' ? a : b;
-  const mortise = a.type === 'mortise' ? a : b;
-  const isDovetail = tenon.id.includes('yanwei') || tenon.id.includes('yw_');
-
-  // ========== 水平一字型嵌合：榫从左向右插入卯 ==========
-  // 榫（tenon）：水平横放，榫头在右端
-  // 卯（mortise）：水平横放，凹槽在左端
-  // 嵌合后：tenon 主体右边缘贴 mortise 左边缘，形成一根完整梁
-
-  const bodyRight = isDovetail ? tenon.width * 0.22 : tenon.width * 0.25;
-
-  // X方向：tenon 主体右边缘与 mortise 左边缘对齐
-  // tenon.x + bodyRight = mortise.x - mortise.width/2
-  const tenonTargetX = mortise.x - mortise.width / 2 - bodyRight;
-
-  // Y方向：中心对齐
-  const tenonTargetY = mortise.y;
-
-  animateSnap(tenon, tenonTargetX, tenonTargetY);
-  animateSnap(mortise, mortise.x, mortise.y);
-
-  a.rotation = 0;
-  b.rotation = 0;
-  a.matched = true;
-  b.matched = true;
-
-  const groupId = 'group_' + App.nextGroupId++;
-  a.groupId = groupId;
-  b.groupId = groupId;
-  App.groups[groupId] = [a.id, b.id];
-}
-
-function onMatchSuccess(a, b) {
-  App.score += 1;
-  updateScoreDisplay();
-  showHint(`【${a.name} × ${b.name}】拼接正确！${a.briefNote}`, 4000);
-
-  // 阶段一子任务推进
-  if (App.currentStage === 1) {
-    const pairIds = [a.id, b.id].sort().join('_');
-    if (pairIds === 'yanwei_01_yanwei_mao_01') {
-      App.task1Done = true;
-      App.currentTask = 2;
-      updateGuidePanel();
-      setTimeout(() => {
-        showHint('【任务一完成】燕尾榫卯已嵌合！接下来请拼接直榫与卯眼。', 5000);
-      }, 4500);
-    } else if (pairIds === 'maoyan_01_zhitui_01') {
-      App.task2Done = true;
-      App.currentTask = 3;
-      updateGuidePanel();
-      setTimeout(() => {
-        showHint('【任务二完成】直榫卯已嵌合！最后请将立柱放到梁下。', 5000);
-      }, 4500);
-    }
-  }
-
-  // 检查解锁彩画
-  checkPatternUnlock();
-}
-
 // ========== 彩画解锁 ==========
 function checkPatternUnlock() {
   for (const pattern of App.patterns) {
@@ -752,624 +345,26 @@ function checkPatternUnlock() {
     if (App.score >= pattern.unlockScore) {
       App.unlockedPatterns.push(pattern.id);
       showHint(`【彩画解锁】${pattern.name} —— ${pattern.description}`, 4000);
+      // 将对应颜料显示到托盘
+      const paint = App.paintPalette.find(p => p.patternId === pattern.id);
+      if (paint && !paint.unlocked) {
+        paint.unlocked = true;
+        updatePaintPalettePositions();
+      }
     }
   }
 }
 
-// ========== 渲染循环 ==========
-function renderLoop() {
-  const ctx = App.ctx;
-  ctx.clearRect(0, 0, App.width, App.height);
-
-  // 更新嵌合动画
-  updateAnimations();
-
-  // 绘制背景纹理（淡淡的网格）
-  drawGrid(ctx);
-
-  // 绘制构件（已匹配组：先画榫再画卯，让卯遮挡榫头形成嵌合感）
-  // 未匹配构件正常绘制
-  const drawn = new Set();
-  for (const groupId in App.groups) {
-    const memberIds = App.groups[groupId];
-    // 按类型排序：tenon先画（底层），mortise后画（顶层），structure最后
-    const sorted = [...memberIds].sort((a, b) => {
-      const ca = App.components.find(c => c.id === a);
-      const cb = App.components.find(c => c.id === b);
-      const order = { tenon: 0, mortise: 1, structure: 2 };
-      return (order[ca?.type] || 0) - (order[cb?.type] || 0);
-    });
-    for (const id of sorted) {
-      const comp = App.components.find(c => c.id === id);
-      if (comp) { drawComponent(ctx, comp); drawn.add(id); }
-    }
+function updatePaintPalettePositions() {
+  // 重新排列所有颜料（不管是否解锁）
+  // 留出顶部空间给操作说明(18px) + 标题(22px)
+  const startY = 300;
+  const itemH = 60;
+  const gap = 12;
+  for (let i = 0; i < App.paintPalette.length; i++) {
+    App.paintPalette[i].x = 60;
+    App.paintPalette[i].y = startY + i * (itemH + gap);
   }
-  // 画未匹配的构件
-  for (const comp of App.components) {
-    if (!drawn.has(comp.id)) {
-      drawComponent(ctx, comp);
-    }
-  }
-
-  // 绘制组连接线（让组合体视觉上更统一）
-  drawGroupConnections(ctx);
-
-  // 绘制手势/鼠标光标
-  if (!App.useMouse && App.hand.visible) {
-    drawCursor(ctx, App.hand.x, App.hand.y, App.hand.pinching);
-  } else if (App.useMouse) {
-    drawCursor(ctx, App.mouse.x, App.mouse.y, App.mouse.down);
-  }
-
-  requestAnimationFrame(renderLoop);
-}
-
-function drawGrid(ctx) {
-  ctx.strokeStyle = 'rgba(196, 165, 116, 0.08)';
-  ctx.lineWidth = 1;
-  const step = 60;
-  for (let x = 0; x < App.width; x += step) {
-    ctx.beginPath();
-    ctx.moveTo(x, 0);
-    ctx.lineTo(x, App.height);
-    ctx.stroke();
-  }
-  for (let y = 0; y < App.height; y += step) {
-    ctx.beginPath();
-    ctx.moveTo(0, y);
-    ctx.lineTo(App.width, y);
-    ctx.stroke();
-  }
-}
-
-// 绘制构件组之间的连接线（模拟木构节点的整体性）
-function drawGroupConnections(ctx) {
-  for (const groupId in App.groups) {
-    const memberIds = App.groups[groupId];
-    if (memberIds.length < 2) continue;
-    
-    const members = memberIds.map(id => App.components.find(c => c.id === id)).filter(Boolean);
-    if (members.length < 2) continue;
-    
-    // 画一条穿过组内所有构件中心的虚线
-    ctx.save();
-    ctx.strokeStyle = 'rgba(196, 165, 116, 0.25)';
-    ctx.lineWidth = 2;
-    ctx.setLineDash([6, 4]);
-    ctx.beginPath();
-    for (let i = 0; i < members.length; i++) {
-      if (i === 0) ctx.moveTo(members[i].x, members[i].y);
-      else ctx.lineTo(members[i].x, members[i].y);
-    }
-    ctx.stroke();
-    ctx.restore();
-    
-    // 在组中心画一个淡淡的金色光晕（表示节点稳固）
-    const centerX = members.reduce((s, m) => s + m.x, 0) / members.length;
-    const centerY = members.reduce((s, m) => s + m.y, 0) / members.length;
-    ctx.save();
-    ctx.fillStyle = 'rgba(196, 165, 116, 0.1)';
-    ctx.beginPath();
-    ctx.arc(centerX, centerY, 20, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.restore();
-  }
-}
-
-// ========== 构件真实形状绘制 ==========
-// 设计理念：参考真实榫卯，一个构件端头有凸出榫头，另一个构件侧面有凹入卯眼
-// 嵌合时呈T字型/L字型
-
-function drawTenonShape(ctx, w, h) {
-  // 直榫：横木，右端有矩形凸出的榫头
-  // 榫头尺寸与卯眼凹槽精确匹配
-  const bodyRight = w * 0.25;  // 主体右边缘
-  const tLen = w * 0.22;       // 榫头长度（与凹槽深度匹配）
-  const tH = h * 0.5;          // 榫头高度（与凹槽高度匹配）
-  const r = 3;
-  ctx.beginPath();
-  ctx.moveTo(-w/2, -h/2);
-  ctx.lineTo(bodyRight, -h/2);
-  ctx.lineTo(bodyRight, -tH/2 + r);
-  ctx.lineTo(bodyRight + r, -tH/2);
-  ctx.lineTo(bodyRight + tLen - r, -tH/2);
-  ctx.lineTo(bodyRight + tLen, -tH/2 + r);
-  ctx.lineTo(bodyRight + tLen, tH/2 - r);
-  ctx.lineTo(bodyRight + tLen - r, tH/2);
-  ctx.lineTo(bodyRight + r, tH/2);
-  ctx.lineTo(bodyRight, tH/2 - r);
-  ctx.lineTo(bodyRight, h/2);
-  ctx.lineTo(-w/2, h/2);
-  ctx.closePath();
-}
-
-function drawMortiseShape(ctx, w, h) {
-  // 卯眼：横木，中间偏右有一个矩形凹入的卯眼（从上下表面向内凿）
-  // 卯眼是一个穿透槽，从上表面和下表面都能看到
-  const gW = w * 0.25;     // 卯眼宽度（沿构件长度方向）
-  const gH = h * 0.45;     // 卯眼深度（从表面向内）
-  const gPosX = w * 0.15;  // 卯眼中心偏右位置
-  ctx.beginPath();
-  // 整体矩形外轮廓
-  ctx.moveTo(-w/2, -h/2);
-  ctx.lineTo(w/2, -h/2);
-  ctx.lineTo(w/2, h/2);
-  ctx.lineTo(-w/2, h/2);
-  ctx.closePath();
-  // 注意：卯眼是一个"洞"，用颜色区分表示
-}
-
-function drawMortiseShapeFilled(ctx, w, h) {
-  // 卯眼外轮廓（整体矩形）
-  ctx.beginPath();
-  ctx.moveTo(-w/2, -h/2);
-  ctx.lineTo(w/2, -h/2);
-  ctx.lineTo(w/2, h/2);
-  ctx.lineTo(-w/2, h/2);
-  ctx.closePath();
-}
-
-function drawDovetailTenonShape(ctx, w, h) {
-  // 燕尾榫：横木，右端有梯形凸出的燕尾榫头
-  // 根部（靠近主体）窄，端部（远离主体）宽 — 像喇叭口展开
-  const bodyRight = w * 0.22;
-  const tLen = w * 0.24;
-  const rootH = h * 0.35;  // 根部窄
-  const tipH = h * 0.65;   // 端部宽
-  const r = 3;
-  ctx.beginPath();
-  ctx.moveTo(-w/2, -h/2);
-  ctx.lineTo(bodyRight, -h/2);
-  ctx.lineTo(bodyRight, -rootH/2);
-  ctx.lineTo(bodyRight + tLen - r, -tipH/2);
-  ctx.quadraticCurveTo(bodyRight + tLen, -tipH/2, bodyRight + tLen, -tipH/2 + r);
-  ctx.lineTo(bodyRight + tLen, tipH/2 - r);
-  ctx.quadraticCurveTo(bodyRight + tLen, tipH/2, bodyRight + tLen - r, tipH/2);
-  ctx.lineTo(bodyRight, rootH/2);
-  ctx.lineTo(bodyRight, h/2);
-  ctx.lineTo(-w/2, h/2);
-  ctx.closePath();
-}
-
-function drawDovetailMortiseShape(ctx, w, h) {
-  // 燕尾卯：横木，中间偏右有一个梯形凹入的燕尾卯眼
-  // 与燕尾榫配套：入口窄（tipH），里面宽（rootH）
-  const gW = w * 0.28;
-  const entryH = h * 0.22;  // 入口窄
-  const innerH = h * 0.75;  // 里面宽
-  const gPosX = w * 0.15;
-  ctx.beginPath();
-  // 整体矩形外轮廓
-  ctx.moveTo(-w/2, -h/2);
-  ctx.lineTo(w/2, -h/2);
-  ctx.lineTo(w/2, h/2);
-  ctx.lineTo(-w/2, h/2);
-  ctx.closePath();
-}
-
-function drawColumnShape(ctx, w, h) {
-  // 柱：带斗状柱头与覆盆柱础的立柱
-  const capH = h * 0.1;
-  const baseH = h * 0.1;
-  const capW1 = w * 1.5;   // 柱头顶宽
-  const capW2 = w * 1.15;  // 柱头底宽
-  const baseW1 = w * 1.15; // 柱础顶宽
-  const baseW2 = w * 1.5;  // 柱础底宽
-  const bodyTop = -h/2 + capH;
-  const bodyBot = h/2 - baseH;
-
-  ctx.beginPath();
-  // 左上柱头顶
-  ctx.moveTo(-capW1/2, -h/2);
-  ctx.lineTo(capW1/2, -h/2);
-  // 右下收至柱身
-  ctx.lineTo(capW2/2, bodyTop);
-  ctx.lineTo(w/2, bodyTop + 2);
-  // 柱身右侧
-  ctx.lineTo(w/2, bodyBot - 2);
-  // 右下柱础
-  ctx.lineTo(baseW1/2, bodyBot);
-  ctx.lineTo(baseW2/2, h/2);
-  ctx.lineTo(-baseW2/2, h/2);
-  // 左下柱础
-  ctx.lineTo(-baseW1/2, bodyBot);
-  ctx.lineTo(-w/2, bodyBot - 2);
-  // 柱身左侧
-  ctx.lineTo(-w/2, bodyTop + 2);
-  // 左上收至柱头
-  ctx.lineTo(-capW2/2, bodyTop);
-  ctx.closePath();
-}
-
-function drawEaveShape(ctx, w, h) {
-  // 屋檐：梯形，上窄下宽
-  const topW = w * 0.6;
-  ctx.beginPath();
-  ctx.moveTo(-topW / 2, -h / 2);
-  ctx.lineTo(topW / 2, -h / 2);
-  ctx.lineTo(w / 2, h / 2);
-  ctx.lineTo(-w / 2, h / 2);
-  ctx.closePath();
-}
-
-// ========== 颜色工具函数 ==========
-function lightenColor(hex, percent) {
-  const num = parseInt(hex.replace('#', ''), 16);
-  const r = Math.min(255, (num >> 16) + Math.round(2.55 * percent));
-  const g = Math.min(255, ((num >> 8) & 0x00FF) + Math.round(2.55 * percent));
-  const b = Math.min(255, (num & 0x0000FF) + Math.round(2.55 * percent));
-  return `rgb(${r},${g},${b})`;
-}
-
-function darkenColor(hex, percent) {
-  const num = parseInt(hex.replace('#', ''), 16);
-  const r = Math.max(0, (num >> 16) - Math.round(2.55 * percent));
-  const g = Math.max(0, ((num >> 8) & 0x00FF) - Math.round(2.55 * percent));
-  const b = Math.max(0, (num & 0x0000FF) - Math.round(2.55 * percent));
-  return `rgb(${r},${g},${b})`;
-}
-
-function drawComponentBody(ctx, comp) {
-  const w = comp.width;
-  const h = comp.height;
-  const id = comp.id;
-  if (id === 'zhitui_01' || id.startsWith('p2_zt_')) { drawTenonShape(ctx, w, h); }
-  else if (id === 'maoyan_01' || id.startsWith('p2_my_')) { drawMortiseShape(ctx, w, h); }
-  else if (id === 'yanwei_01' || id.startsWith('p2_yw_')) { drawDovetailTenonShape(ctx, w, h); }
-  else if (id === 'yanwei_mao_01' || id.startsWith('p2_ym_')) { drawDovetailMortiseShape(ctx, w, h); }
-  else if (id === 'zhu_01' || id.startsWith('p2_zhu_')) { drawColumnShape(ctx, w, h); }
-  else if (comp.type === 'eave') { drawEaveShape(ctx, w, h); }
-  else { roundRect(ctx, -w/2, -h/2, w, h, 4); }
-}
-
-function drawComponent(ctx, comp) {
-  ctx.save();
-  ctx.translate(comp.x, comp.y);
-  ctx.rotate((comp.rotation * Math.PI) / 180);
-
-  const w = comp.width;
-  const h = comp.height;
-  const halfW = w / 2;
-  const halfH = h / 2;
-
-  // 判断状态
-  const isHover = (App.hoverComponent === comp);
-  const isDragging = (App.draggingComponent === comp);
-
-  // 阴影
-  ctx.shadowColor = 'rgba(0,0,0,0.3)';
-  ctx.shadowBlur = isDragging ? 20 : 8;
-  ctx.shadowOffsetY = isDragging ? 8 : 4;
-
-  // 主体填充（使用渐变模拟3D立体木材质感）
-  const baseColor = comp.matched ? '#c4a574' : comp.color;
-  const hoverColor = comp.matched ? '#d4b584' : '#a08060';
-  const fillColor = (isHover && !comp.matched) ? hoverColor : baseColor;
-  
-  const grad = ctx.createLinearGradient(0, -halfH, 0, halfH);
-  grad.addColorStop(0, lightenColor(fillColor, 15));
-  grad.addColorStop(0.3, fillColor);
-  grad.addColorStop(1, darkenColor(fillColor, 20));
-  ctx.fillStyle = grad;
-  
-  drawComponentBody(ctx, comp);
-  ctx.fill();
-
-  // 边框描边
-  ctx.shadowColor = 'transparent';
-  ctx.strokeStyle = comp.matched ? '#e8c97a' : (isHover ? '#d4a017' : '#4a3728');
-  ctx.lineWidth = comp.matched ? 3 : 2;
-  if (isHover) ctx.lineWidth = 3;
-  drawComponentBody(ctx, comp);
-  ctx.stroke();
-
-  // ===== 卯眼的"洞"可视化 =====
-  ctx.shadowColor = 'transparent';
-  if (comp.id === 'maoyan_01' || comp.id.startsWith('p2_my_')) {
-    // 直卯眼：矩形凹槽在 mortise 左端，水平凹入
-    // 与直榫头精确匹配：tLen = w*0.22, tH = h*0.5
-    const grooveH = h * 0.5;    // 竖直高度 = 榫头高度
-    const grooveD = w * 0.22;   // 水平深度 = 榫头长度
-    const gX = -w/2;            // 左边缘
-    const gY = -grooveH/2;      // 垂直居中
-    ctx.fillStyle = 'rgba(35, 25, 18, 0.5)';
-    ctx.fillRect(gX, gY, grooveD, grooveH);
-    ctx.strokeStyle = 'rgba(35, 25, 18, 0.3)';
-    ctx.lineWidth = 1;
-    ctx.strokeRect(gX, gY, grooveD, grooveH);
-  }
-  if (comp.id === 'yanwei_mao_01' || comp.id.startsWith('p2_ym_')) {
-    // 燕尾卯眼：梯形凹槽在 mortise 左端，水平凹入
-    // 与燕尾榫头精确匹配：tLen = w*0.24, rootH = h*0.65（根部宽）, tipH = h*0.35（端部窄）
-    // 凹槽入口窄（匹配端部窄），里面宽（匹配根部宽）
-    const tipH = h * 0.35;      // 端部窄 = 入口窄
-    const rootH = h * 0.65;     // 根部宽 = 里面宽
-    const grooveD = w * 0.24;   // 深度 = 榫头长度
-
-    const leftX = -w/2;              // 左边缘（入口 = 窄）
-    const rightX = -w/2 + grooveD;   // 内边缘（里面 = 宽）
-    const cy = 0;                    // 垂直居中
-
-    ctx.fillStyle = 'rgba(35, 25, 18, 0.45)';
-    ctx.beginPath();
-    ctx.moveTo(leftX, cy - tipH/2);     // 入口左上（窄）
-    ctx.lineTo(leftX, cy + tipH/2);     // 入口左下（窄）
-    ctx.lineTo(rightX, cy + rootH/2);   // 里面右下（宽）
-    ctx.lineTo(rightX, cy - rootH/2);   // 里面右上（宽）
-    ctx.closePath();
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(35, 25, 18, 0.3)';
-    ctx.lineWidth = 1;
-    ctx.stroke();
-  }
-
-  // ===== 构件内部纹理细节 =====
-  // 直榫：榫头与主体交界线 + 纵向木纹
-  if (comp.id === 'zhitui_01' || comp.id.startsWith('p2_zt_')) {
-    ctx.strokeStyle = 'rgba(43,33,24,0.15)';
-    ctx.lineWidth = 1;
-    const bodyRight = w * 0.25;
-    ctx.beginPath();
-    ctx.moveTo(bodyRight, -h/2 + 4);
-    ctx.lineTo(bodyRight, h/2 - 4);
-    ctx.stroke();
-    for (let i = -1; i <= 1; i++) {
-      ctx.beginPath();
-      ctx.moveTo(i * 15, -h/2 + 6);
-      ctx.lineTo(i * 15, h/2 - 6);
-      ctx.stroke();
-    }
-  }
-
-  // 卯眼：纵向木纹
-  if (comp.id === 'maoyan_01' || comp.id.startsWith('p2_my_')) {
-    ctx.strokeStyle = 'rgba(43,33,24,0.12)';
-    ctx.lineWidth = 1;
-    for (let i = -2; i <= 2; i++) {
-      const lx = i * 12;
-      // 凹槽在左端 x∈[-w/2, -w/2+grooveD]，木纹线在右侧不重叠
-      ctx.beginPath();
-      ctx.moveTo(lx, -h/2 + 6);
-      ctx.lineTo(lx, h/2 - 6);
-      ctx.stroke();
-    }
-  }
-
-  // 燕尾榫：交界线 + 纵向木纹
-  if (comp.id === 'yanwei_01' || comp.id.startsWith('p2_yw_')) {
-    ctx.strokeStyle = 'rgba(43,33,24,0.15)';
-    ctx.lineWidth = 1;
-    const bodyRight = w * 0.22;
-    ctx.beginPath();
-    ctx.moveTo(bodyRight, -h/2 + 4);
-    ctx.lineTo(bodyRight, h/2 - 4);
-    ctx.stroke();
-    for (let i = -1; i <= 1; i++) {
-      ctx.beginPath();
-      ctx.moveTo(i * 15, -h/2 + 6);
-      ctx.lineTo(i * 15, h/2 - 6);
-      ctx.stroke();
-    }
-  }
-
-  // 燕尾卯：木纹
-  if (comp.id === 'yanwei_mao_01' || comp.id.startsWith('p2_ym_')) {
-    ctx.strokeStyle = 'rgba(43,33,24,0.12)';
-    ctx.lineWidth = 1;
-    for (let i = -2; i <= 2; i++) {
-      const lx = i * 14;
-      // 凹槽在左端，木纹线在右侧不重叠
-      ctx.beginPath();
-      ctx.moveTo(lx, -h/2 + 6);
-      ctx.lineTo(lx, h/2 - 6);
-      ctx.stroke();
-    }
-  }
-
-  // 柱：斗状柱头线 + 覆盆柱础线 + 纵向木纹
-  if (comp.id === 'zhu_01' || comp.id.startsWith('p2_zhu_')) {
-    ctx.strokeStyle = 'rgba(43,33,24,0.14)';
-    ctx.lineWidth = 1;
-    const capH = h * 0.1;
-    const baseH = h * 0.1;
-    const bodyTop = -h/2 + capH;
-    const bodyBot = h/2 - baseH;
-    ctx.beginPath();
-    ctx.moveTo(-w * 0.6, bodyTop);
-    ctx.lineTo(w * 0.6, bodyTop);
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.moveTo(-w * 0.6, bodyBot);
-    ctx.lineTo(w * 0.6, bodyBot);
-    ctx.stroke();
-    for (let i = -1; i <= 1; i++) {
-      ctx.beginPath();
-      ctx.moveTo(i * 8, bodyTop + 4);
-      ctx.lineTo(i * 8, bodyBot - 4);
-      ctx.stroke();
-    }
-  }
-
-  // 已匹配标记
-  if (comp.matched) {
-    ctx.fillStyle = '#2e5c4f';
-    ctx.beginPath();
-    ctx.arc(halfW - 10, -halfH + 10, 6, 0, Math.PI * 2);
-    ctx.fill();
-  }
-
-  // 文字
-  ctx.fillStyle = '#2b2118';
-  ctx.font = 'bold 14px "PingFang SC", "Microsoft YaHei", sans-serif';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText(comp.name, 0, 0);
-
-  // 类型标识小图标
-  ctx.font = '10px sans-serif';
-  ctx.fillStyle = 'rgba(43,33,24,0.5)';
-  const typeLabel = comp.type === 'tenon' ? '榫' : comp.type === 'mortise' ? '卯' : '构';
-  ctx.fillText(typeLabel, halfW - 14, halfH - 10);
-
-  // 绘制已解锁的彩画装饰
-  if (comp.matched) {
-    drawPatternOverlay(ctx, comp, halfW, halfH);
-  }
-
-  // 悬停时绘制传统文化注释气泡
-  if (isHover && comp.briefNote) {
-    drawNoteBubble(ctx, comp, halfW, halfH);
-  }
-
-  ctx.restore();
-}
-
-function drawNoteBubble(ctx, comp, halfW, halfH) {
-  const padding = 10;
-  const lineHeight = 18;
-  const maxLineWidth = 220;
-
-  // 准备文字内容
-  const lines = [];
-  lines.push({ text: comp.briefNote, size: 13, weight: 'bold', color: '#e8dcc8' });
-  if (comp.origin) {
-    const originLines = wrapText(ctx, comp.origin, maxLineWidth);
-    for (const line of originLines) {
-      lines.push({ text: line, size: 11, weight: 'normal', color: '#b0a08a' });
-    }
-  }
-
-  // 计算气泡尺寸
-  ctx.font = `bold 13px "Noto Serif SC", "PingFang SC", serif`;
-  const briefW = ctx.measureText(comp.briefNote).width;
-  let boxW = Math.max(briefW + padding * 2, maxLineWidth + padding * 2);
-  const boxH = lines.length * lineHeight + padding * 2 - 4;
-
-  // 气泡位置：构件上方居中
-  const boxX = -boxW / 2;
-  const boxY = -halfH - boxH - 14;
-
-  // 绘制气泡背景（带毛玻璃效果）
-  ctx.save();
-  ctx.globalAlpha = 0.92;
-  ctx.fillStyle = 'rgba(43, 33, 24, 0.85)';
-  roundRect(ctx, boxX, boxY, boxW, boxH, 8);
-  ctx.fill();
-
-  // 气泡边框（金色细线）
-  ctx.globalAlpha = 1;
-  ctx.strokeStyle = '#8b7355';
-  ctx.lineWidth = 1;
-  roundRect(ctx, boxX, boxY, boxW, boxH, 8);
-  ctx.stroke();
-
-  // 小三角箭头
-  ctx.fillStyle = 'rgba(43, 33, 24, 0.85)';
-  ctx.beginPath();
-  ctx.moveTo(-6, boxY + boxH);
-  ctx.lineTo(6, boxY + boxH);
-  ctx.lineTo(0, boxY + boxH + 6);
-  ctx.closePath();
-  ctx.fill();
-  ctx.strokeStyle = '#8b7355';
-  ctx.beginPath();
-  ctx.moveTo(-6, boxY + boxH);
-  ctx.lineTo(0, boxY + boxH + 6);
-  ctx.lineTo(6, boxY + boxH);
-  ctx.stroke();
-
-  // 绘制文字
-  let textY = boxY + padding + 12;
-  for (const line of lines) {
-    ctx.font = `${line.weight} ${line.size}px "Noto Serif SC", "PingFang SC", serif`;
-    ctx.fillStyle = line.color;
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(line.text, boxX + padding, textY);
-    textY += lineHeight;
-  }
-
-  // 顶部装饰小横线
-  ctx.strokeStyle = '#c4a574';
-  ctx.lineWidth = 1.5;
-  ctx.beginPath();
-  ctx.moveTo(boxX + padding, boxY + 6);
-  ctx.lineTo(boxX + padding + 24, boxY + 6);
-  ctx.stroke();
-
-  ctx.restore();
-}
-
-function wrapText(ctx, text, maxWidth) {
-  const words = text.split('');
-  const lines = [];
-  let currentLine = '';
-
-  for (const char of words) {
-    const testLine = currentLine + char;
-    const metrics = ctx.measureText(testLine);
-    if (metrics.width > maxWidth && currentLine !== '') {
-      lines.push(currentLine);
-      currentLine = char;
-    } else {
-      currentLine = testLine;
-    }
-  }
-  lines.push(currentLine);
-  return lines;
-}
-
-function drawPatternOverlay(ctx, comp, halfW, halfH) {
-  // 根据已解锁彩画绘制简单装饰
-  if (App.unlockedPatterns.includes('hexi_01')) {
-    ctx.strokeStyle = 'rgba(196, 165, 116, 0.5)';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(-halfW + 5, -halfH + 5);
-    ctx.lineTo(-halfW + 15, -halfH + 5);
-    ctx.lineTo(-halfW + 15, -halfH + 15);
-    ctx.stroke();
-  }
-  if (App.unlockedPatterns.includes('xuanzi_01')) {
-    ctx.fillStyle = 'rgba(143, 188, 143, 0.3)';
-    ctx.beginPath();
-    ctx.arc(0, 0, 8, 0, Math.PI * 2);
-    ctx.fill();
-  }
-}
-
-function roundRect(ctx, x, y, w, h, r) {
-  ctx.beginPath();
-  ctx.moveTo(x + r, y);
-  ctx.lineTo(x + w - r, y);
-  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
-  ctx.lineTo(x + w, y + h - r);
-  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
-  ctx.lineTo(x + r, y + h);
-  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
-  ctx.lineTo(x, y + r);
-  ctx.quadraticCurveTo(x, y, x + r, y);
-  ctx.closePath();
-}
-
-function drawCursor(ctx, x, y, pinching) {
-  ctx.save();
-  ctx.strokeStyle = pinching ? '#e8c97a' : '#c4a574';
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.arc(x, y, pinching ? 8 : 12, 0, Math.PI * 2);
-  ctx.stroke();
-  ctx.fillStyle = pinching ? 'rgba(232, 201, 122, 0.4)' : 'rgba(196, 165, 116, 0.2)';
-  ctx.fill();
-  ctx.restore();
-}
-
-function updateHandCursor(x, y, pinching) {
-  const cursor = document.getElementById('hand-cursor');
-  cursor.style.display = 'block';
-  cursor.style.left = x + 'px';
-  cursor.style.top = y + 'px';
-  cursor.classList.toggle('pinching', pinching);
 }
 
 // ========== UI 功能 ==========
@@ -1419,6 +414,27 @@ function initPhase2() {
   const btnPhase2 = document.getElementById('btn-phase2');
   if (btnPhase2) btnPhase2.style.display = 'none';
 
+  // 显示搭建引导按钮
+  const btnBuildGuide = document.getElementById('btn-build-guide');
+  if (btnBuildGuide) btnBuildGuide.style.display = 'inline-block';
+
+  // 弹出进入阶段二的弹窗
+  const overlay = document.createElement('div');
+  overlay.id = 'phase2-overlay';
+  overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);z-index:100;display:flex;align-items:center;justify-content:center;';
+  const dialog = document.createElement('div');
+  dialog.style.cssText = 'background:rgba(43,33,24,0.97);border:1px solid #c4a574;border-radius:12px;padding:32px 40px;max-width:420px;text-align:center;color:#d4c9b8;font-family:inherit;';
+  dialog.innerHTML = '<h3 style="color:#c4a574;font-size:1.4rem;margin:0 0 12px 0;">进入阶段二 · 自由搭建</h3><p style="font-size:0.95rem;line-height:1.6;margin:0 0 20px 0;">阶段一完成！现在你可以使用各种构件自由搭建传统木构建筑，也可点击下方「搭建引导」按钮跟随提示逐步搭建一座牌楼。</p><button class="btn primary" id="btn-phase2-ok" style="padding:10px 32px;font-size:1rem;">确认</button>';
+  overlay.appendChild(dialog);
+  document.body.appendChild(overlay);
+
+  // 全局函数：鼠标和手势捏合都能关闭弹窗
+  window.closePhase2Modal = function() {
+    const el = document.getElementById('phase2-overlay');
+    if (el) el.remove();
+  };
+  document.getElementById('btn-phase2-ok').addEventListener('click', window.closePhase2Modal);
+
   // 清空阶段一的构件
   App.components = [];
   App.groups = {};
@@ -1435,10 +451,10 @@ function initPhase2() {
 
   // 生成多种尺寸的直榫+直卯（4种尺寸）
   const sizes = [
-    { w: 100, h: 40, label: '小' },
-    { w: 130, h: 50, label: '中' },
-    { w: 160, h: 55, label: '大' },
-    { w: 200, h: 65, label: '特大' },
+    { w: 105, h: 32, label: '小' },
+    { w: 135, h: 40, label: '中' },
+    { w: 165, h: 44, label: '大' },
+    { w: 280, h: 52, label: '特大' },
   ];
 
   const spacing = 90;
@@ -1474,9 +490,9 @@ function initPhase2() {
 
   // 燕尾榫+燕尾卯（3种尺寸）
   const ywSizes = [
-    { w: 110, h: 45, label: '小' },
-    { w: 150, h: 55, label: '中' },
-    { w: 190, h: 65, label: '大' },
+    { w: 115, h: 36, label: '小' },
+    { w: 155, h: 44, label: '中' },
+    { w: 195, h: 52, label: '大' },
   ];
 
   ywSizes.forEach((sz, si) => {
@@ -1498,52 +514,92 @@ function initPhase2() {
       category: '自由搭建', x: cx + 350, y: baseY,
       width: sz.w, height: sz.h, rotation: 0, matched: false,
       unlocks: [], description: '燕尾卯 - ' + sz.label + '号构件',
-      briefNote: '口阔腹窄，请君入瓮。',
+      briefNote: '口窄腹阔，请君入瓮。',
       origin: '燕尾卯需逆燕尾之形而凿。',
       rules: { mateWith: ['p2_yw_' + si], tolerance: 90, angleTolerance: 15 },
       color: '#7a6548', groupId: null, sizeKey: 'yw' + si,
     });
   });
 
-  // 柱（3根，不同高度）
-  const pillarH = [100, 140, 180];
-  pillarH.forEach((ph, si) => {
+  // 柱（4种高度，每种2根）
+  const pillarSpecs = [
+    { h: 130, label: '短' },
+    { h: 170, label: '中' },
+    { h: 210, label: '长' },
+    { h: 260, label: '特长' },
+  ];
+  pillarSpecs.forEach((spec, si) => {
+    for (let copy = 0; copy < 2; copy++) {
+      App.components.push({
+        id: 'p2_zhu_' + si + '_' + copy, name: '柱(' + spec.label + ')', type: 'structure',
+        category: '自由搭建', x: cx - 180 + si * 90 + copy * 45, y: 75,
+        width: 38, height: spec.h, rotation: 0, matched: false,
+        unlocks: [], description: '立柱 - ' + spec.label,
+        briefNote: '木秀于林，柱立于堂。',
+        origin: '柱之称谓始于殷墟。',
+        rules: { mateWith: [], tolerance: 0, angleTolerance: 0 },
+        color: '#a08060', groupId: null,
+      });
+    }
+  });
+
+
+  // 雀替（左3份 + 右3份）
+  const quetiLeftPositions = [
+    { x: cx - 260, y: 145 },
+    { x: cx - 300, y: 220 },
+    { x: cx - 220, y: 300 },
+  ];
+  quetiLeftPositions.forEach((pos, i) => {
     App.components.push({
-      id: 'p2_zhu_' + si, name: '柱(高' + ph + ')', type: 'structure',
-      category: '自由搭建', x: cx - 50 + si * 80, y: 80,
-      width: 45, height: ph, rotation: 0, matched: false,
-      unlocks: [], description: '立柱 - 高' + ph,
-      briefNote: '木秀于林，柱立于堂。',
-      origin: '柱之称谓始于殷墟。',
+      id: 'p2_nt_l_' + i, name: '雀替(左)', type: 'bracket',
+      category: '自由搭建', x: pos.x, y: pos.y,
+      width: 65, height: 85, rotation: 0, matched: false,
+      unlocks: [], description: '雀替(左)，上承檐檩，下倚柱身，龙纹透雕如云卷风舒，既承重又具装饰之美。',
+      briefNote: '上承千斤，下卷祥云。',
+      origin: '雀替为传统建筑檐下标配，左右成对。',
       rules: { mateWith: [], tolerance: 0, angleTolerance: 0 },
-      color: '#a08060', groupId: null,
+      color: '#8a7050', groupId: null,
+    });
+  });
+  const quetiRightPositions = [
+    { x: cx + 150, y: 145 },
+    { x: cx + 190, y: 220 },
+    { x: cx + 110, y: 300 },
+  ];
+  quetiRightPositions.forEach((pos, i) => {
+    App.components.push({
+      id: 'p2_nt_r_' + i, name: '雀替(右)', type: 'bracket',
+      category: '自由搭建', x: pos.x, y: pos.y,
+      width: 65, height: 85, rotation: 0, matched: false,
+      unlocks: [], description: '雀替(右)，与左雀替对称呼应，共承檐角。',
+      briefNote: '左右对映，翼然如飞。',
+      origin: '雀替左右成对，为传统建筑檐下标配。',
+      rules: { mateWith: [], tolerance: 0, angleTolerance: 0 },
+      color: '#8a7050', groupId: null,
     });
   });
 
-  // 屋檐（2个，梯形）
-  App.components.push({
-    id: 'p2_wy_0', name: '屋檐(左)', type: 'eave',
-    category: '自由搭建', x: cx - 120, y: 80,
-    width: 180, height: 50, rotation: 0, matched: false,
-    unlocks: [], description: '飞檐翘角，翼角起翘，为传统建筑之冠冕。',
-    briefNote: '飞檐如翼，凌空展翅。',
-    origin: '屋檐做法始于先秦，至唐宋臻于成熟。',
-    rules: { mateWith: [], tolerance: 0, angleTolerance: 0 },
-    color: '#7a5c3a', groupId: null,
+  // 屋檐（大中小三种，已放大三倍）
+  const wuSizes = [
+    { name: '屋檐(大)', w: 900, h: 320, x: cx - 470, y: 80 },
+    { name: '屋檐(中)', w: 540, h: 180, x: cx - 60, y: 75 },
+    { name: '屋檐(小)', w: 390, h: 132, x: cx + 280, y: 90 },
+  ];
+  wuSizes.forEach((sz, i) => {
+    App.components.push({
+      id: 'p2_wy_' + i, name: sz.name, type: 'eave',
+      category: '自由搭建', x: sz.x, y: sz.y,
+      width: sz.w, height: sz.h, rotation: 0, matched: false,
+      unlocks: [], description: '飞檐翘角，翼角起翘，为传统建筑之冠冕。',
+      briefNote: '飞檐如翼，凌空展翅。',
+      origin: '屋檐做法始于先秦，至唐宋臻于成熟。',
+      rules: { mateWith: [], tolerance: 0, angleTolerance: 0 },
+      color: '#7a5c3a', groupId: null,
+    });
   });
 
-  App.components.push({
-    id: 'p2_wy_1', name: '屋檐(右)', type: 'eave',
-    category: '自由搭建', x: cx + 120, y: 80,
-    width: 180, height: 50, rotation: 0, matched: false,
-    unlocks: [], description: '飞檐翘角，与左檐对称呼应。',
-    briefNote: '翼角对飞，气韵生动。',
-    origin: '檐角起翘之制，见于南方建筑。',
-    rules: { mateWith: [], tolerance: 0, angleTolerance: 0 },
-    color: '#7a5c3a', groupId: null,
-  });
-
-  showHint('【阶段二 - 自由搭建】用各种构件自由搭建传统木构建筑！按R键可旋转构件。');
+  showHint('【阶段二 - 自由搭建】用各种构件自由搭建传统木构建筑！');
 }
 
 function resetBuild() {
@@ -1554,6 +610,8 @@ function resetBuild() {
   App.groups = {};
   App.nextGroupId = 1;
   App.dragGroupOffset = {};
+  App.paintPalette = [];
+  App.draggingPaint = null;
   // 重置阶段状态
   App.currentStage = 1;
   App.currentTask = 1;
@@ -1566,6 +624,15 @@ function resetBuild() {
   // 隐藏自由搭建按钮
   const btnReset = document.getElementById('btn-phase2');
   if (btnReset) btnReset.style.display = 'none';
+  const btnBuildGuide = document.getElementById('btn-build-guide');
+  if (btnBuildGuide) btnBuildGuide.style.display = 'none';
+  // 清除搭建引导状态
+  App.buildGuide = null;
+  App.buildGuideTargets = [];
+  // 恢复所有构件可见
+  for (const comp of App.components) comp.hidden = false;
+  const guidePanel = document.getElementById('build-guide-panel');
+  if (guidePanel) guidePanel.style.display = 'none';
   updateScoreDisplay();
   updateGuidePanel();
   initComponents();
@@ -1618,49 +685,480 @@ function toggleGuide() {
   document.body.appendChild(guide);
 }
 
-// ========== SVG 导出 ==========
-function exportSVG() {
-  const w = 1920;
-  const h = 1080;
-  let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">`;
-  svg += `<rect width="100%" height="100%" fill="#f4f1ea"/>`;
+// ========== 搭建引导系统 ==========
 
-  // 计算居中偏移
-  const offsetX = (w - App.width) / 2;
-  const offsetY = (h - App.height) / 2;
+function startBuildGuide() {
+  // 初始化搭建引导
+  App.buildGuide = { step: 1, total: 5, completed: false, stepIds: [], placedTargets: [] };
+  App.buildGuideTargets = [];
 
+  // 显示面板
+  const panel = document.getElementById('build-guide-panel');
+  if (panel) panel.style.display = 'block';
+
+  // 隐藏引导按钮
+  const btn = document.getElementById('btn-build-guide');
+  if (btn) btn.style.display = 'none';
+
+  // 为引导生成新的构件实例，放在画布底部
+  createGuideComponents();
+
+  advanceBuildGuideStep();
+  updateBuildGuideVisibility();
+  showHint('【搭建引导】跟随指示，搭建一座传统古建筑！', 2500);
+}
+
+// 为搭建引导创建全新的构件实例
+function createGuideComponents() {
+  const cx = App.width / 2;
+  const baseY = App.height / 2 + 80;
+
+  // 隐藏所有现有构件
   for (const comp of App.components) {
-    const cx = comp.x + offsetX;
-    const cy = comp.y + offsetY;
-    const halfW = comp.width / 2;
-    const halfH = comp.height / 2;
+    comp.hidden = true;
+  }
+  // 清空组和动画
+  App.groups = {};
+  App.nextGroupId = 1;
 
-    svg += `<g transform="translate(${cx}, ${cy}) rotate(${comp.rotation})">`;
-    svg += `<rect x="${-halfW}" y="${-halfH}" width="${comp.width}" height="${comp.height}" rx="4" fill="${comp.matched ? '#c4a574' : comp.color}" stroke="${comp.matched ? '#e8c97a' : '#4a3728'}" stroke-width="2"/>`;
-    svg += `<text x="0" y="0" text-anchor="middle" dominant-baseline="central" fill="#2b2118" font-size="14" font-weight="bold">${comp.name}</text>`;
-    if (comp.matched) {
-      svg += `<circle cx="${halfW - 10}" cy="${-halfH + 10}" r="6" fill="#2e5c4f"/>`;
-    }
-    svg += `</g>`;
+  const guideIds = [
+    'p2_zhu_2_0', 'p2_zhu_2_1',
+    'p2_zt_3', 'p2_my_3',
+    'p2_nt_l_0', 'p2_nt_r_0', 'p2_nt_l_1', 'p2_nt_r_1',
+    'p2_wy_0'
+  ];
+
+  // 移除已有的同名构件（如果有）
+  App.components = App.components.filter(c => !guideIds.includes(c.id));
+
+  // 左柱
+  App.components.push({
+    id: 'p2_zhu_2_0', name: '立柱', type: 'structure',
+    category: '自由搭建', x: cx - 420, y: baseY,
+    width: 38, height: 210, rotation: 0, matched: false,
+    unlocks: [], description: '立柱为建筑之骨架，直挺如松，承载千钧。',
+    briefNote: '直如松柏，顶立苍穹。',
+    origin: '柱之制始于穴居时代，历代皆有定制。',
+    rules: { mateWith: [], tolerance: 0, angleTolerance: 0 },
+    color: '#a08060', groupId: null, hidden: false,
+  });
+  // 右柱
+  App.components.push({
+    id: 'p2_zhu_2_1', name: '立柱', type: 'structure',
+    category: '自由搭建', x: cx - 340, y: baseY,
+    width: 38, height: 210, rotation: 0, matched: false,
+    unlocks: [], description: '立柱为建筑之骨架，直挺如松，承载千钧。',
+    briefNote: '直如松柏，顶立苍穹。',
+    origin: '柱之制始于穴居时代，历代皆有定制。',
+    rules: { mateWith: [], tolerance: 0, angleTolerance: 0 },
+    color: '#a08060', groupId: null, hidden: false,
+  });
+  // 直榫(特大)
+  App.components.push({
+    id: 'p2_zt_3', name: '直榫(特大)', type: 'tenon',
+    category: '自由搭建', x: cx - 200, y: baseY,
+    width: 280, height: 52, rotation: 0, matched: false,
+    unlocks: [], description: '直榫——直出平入，为最基本的榫卯构造之一。',
+    briefNote: '直出平入，稳如磐石。',
+    origin: '直榫为最古老的榫卯形式之一，早在河姆渡时期已见雏形。',
+    rules: { mateWith: ['p2_my_3'], tolerance: 120, angleTolerance: 25 },
+    color: '#8a6b4a', groupId: null, hidden: false,
+  });
+  // 直卯(特大)
+  App.components.push({
+    id: 'p2_my_3', name: '直卯(特大)', type: 'mortise',
+    category: '自由搭建', x: cx - 80, y: baseY,
+    width: 280, height: 52, rotation: 0, matched: false,
+    unlocks: [], description: '直卯——与直榫配对，形成最基础的嵌合结构。',
+    briefNote: '有容乃大，不露锋芒。',
+    origin: '卯字本义为"冒"，取覆盖之意。',
+    rules: { mateWith: ['p2_zt_3'], tolerance: 120, angleTolerance: 25 },
+    color: '#8a6b4a', groupId: null, hidden: false,
+  });
+  // 雀替：左柱左、左柱右、右柱左、右柱右
+  const queTiIds = ['p2_nt_l_0', 'p2_nt_r_0', 'p2_nt_l_1', 'p2_nt_r_1'];
+  const queTiNames = ['雀替(左)', '雀替(右)', '雀替(左)', '雀替(右)'];
+  const queTiX = [cx + 60, cx + 160, cx + 260, cx + 360];
+  for (let i = 0; i < 4; i++) {
+    App.components.push({
+      id: queTiIds[i], name: queTiNames[i], type: 'bracket',
+      category: '自由搭建', x: queTiX[i], y: baseY,
+      width: 65, height: 85, rotation: 0, matched: false,
+      unlocks: [], description: '雀替，上承檐檩，下倚柱身，龙纹透雕如云卷风舒，既承重又具装饰之美。',
+      briefNote: '上承千斤，下卷祥云。',
+      origin: '雀替为传统建筑檐下标配，左右成对。',
+      rules: { mateWith: [], tolerance: 0, angleTolerance: 0 },
+      color: '#8a7050', groupId: null, hidden: false,
+    });
   }
 
+  // 屋檐(大) — 放在上方，避免遮挡雀替
+  App.components.push({
+    id: 'p2_wy_0', name: '屋檐(大)', type: 'eave',
+    category: '自由搭建', x: cx + 520, y: baseY - 200,
+    width: 900, height: 320, rotation: 0, matched: false,
+    unlocks: [], description: '飞檐翘角，翼角起翘，为传统建筑之冠冕。',
+    briefNote: '飞檐如翼，凌空展翅。',
+    origin: '屋檐做法始于先秦，至唐宋臻于成熟。',
+    rules: { mateWith: [], tolerance: 0, angleTolerance: 0 },
+    color: '#7a5c3a', groupId: null, hidden: false,
+  });
+}
+
+function closeBuildGuide() {
+  App.buildGuide = null;
+  App.buildGuideTargets = [];
+
+  // 恢复所有构件可见
+  for (const comp of App.components) {
+    comp.hidden = false;
+  }
+
+  const panel = document.getElementById('build-guide-panel');
+  if (panel) panel.style.display = 'none';
+
+  const btn = document.getElementById('btn-build-guide');
+  if (btn) btn.style.display = 'inline-block';
+
+  showHint('已退出搭建引导，可自由搭建', 1500);
+}
+
+function updateBuildGuideVisibility() {
+  const g = App.buildGuide;
+  if (!g || !g.stepIds) {
+    for (const comp of App.components) comp.hidden = false;
+    return;
+  }
+  // 引导期间：收集所有步骤需要的构件ID
+  const allGuideIds = new Set();
+  // 左柱、右柱
+  allGuideIds.add('p2_zhu_2_0');
+  allGuideIds.add('p2_zhu_2_1');
+  // 横梁（直榫+直卯，先拼好再架）
+  allGuideIds.add('p2_zt_3');
+  allGuideIds.add('p2_my_3');
+  // 雀替（每柱左右各一，共4个）
+  allGuideIds.add('p2_nt_l_0');
+  allGuideIds.add('p2_nt_r_0');
+  allGuideIds.add('p2_nt_l_1');
+  allGuideIds.add('p2_nt_r_1');
+  // 屋檐
+  allGuideIds.add('p2_wy_0');
+
+  for (const comp of App.components) {
+    comp.hidden = !allGuideIds.has(comp.id);
+  }
+}
+
+function advanceBuildGuideStep() {
+  const g = App.buildGuide;
+  if (!g) return;
+
+  App.buildGuideTargets = [];
+  g.placedTargets = [];
+  const cx = App.width / 2;
+  const cy = App.height / 2;
+
+  // 设置步骤所需构件，只显示当前步骤需要的
+  const stepIds = [];
+
+  if (g.step === 1) {
+    // 步骤1：立左柱（吸附后中心在 cx-181, cy+145）
+    const targetX = cx - 200;
+    const targetY = cy + 40;
+    App.buildGuideTargets.push({
+      x: targetX, y: targetY, w: 38, h: 210, icon: '柱', compId: 'p2_zhu_2_0', label: '立左柱'
+    });
+    stepIds.push('p2_zhu_2_0');
+    updateGuideStepText('第 1 步 · 立左柱', '将一根立柱拖到左侧金色虚线框内，作为建筑的左柱。');
+  } else if (g.step === 2) {
+    // 步骤2：立右柱（吸附后中心在 cx+181, cy+145）
+    const targetX = cx + 162;
+    const targetY = cy + 40;
+    App.buildGuideTargets.push({
+      x: targetX, y: targetY, w: 38, h: 210, icon: '柱', compId: 'p2_zhu_2_1', label: '立右柱'
+    });
+    stepIds.push('p2_zhu_2_1');
+    updateGuideStepText('第 2 步 · 立右柱', '将另一根立柱拖到右侧金色虚线框内，形成双柱结构。');
+  } else if (g.step === 3) {
+    // 步骤3：架梁（拼好的榫卯组合，整体宽约300px）
+    // 目标：在两根柱子顶部之间放一个梁
+    const targetX = cx - 140;
+    const targetY = cy - 12;
+    App.buildGuideTargets.push({
+      x: targetX, y: targetY, w: 280, h: 52, icon: '梁', compId: 'p2_zt_3', label: '横梁'
+    });
+    stepIds.push('p2_zt_3', 'p2_my_3');
+    updateGuideStepText('第 3 步 · 架横梁', '先将特大直榫和特大直卯拼接成完整横梁，再将拼好的横梁整体拖到两柱顶部之间的金色虚线框处。');
+  } else if (g.step === 4) {
+    // 步骤4：装雀替（每柱顶端左右各一，共4个）
+    // 雀替嵌入柱子6px、嵌入横梁8px后的目标位置
+    const ty = cy + 32;
+    App.buildGuideTargets.push(
+      { x: cx - 259, y: ty, w: 65, h: 85, icon: '左', compId: 'p2_nt_l_0', label: '左柱左雀替' },
+      { x: cx - 168, y: ty, w: 65, h: 85, icon: '右', compId: 'p2_nt_r_0', label: '左柱右雀替' },
+      { x: cx + 103, y: ty, w: 65, h: 85, icon: '左', compId: 'p2_nt_l_1', label: '右柱左雀替' },
+      { x: cx + 194, y: ty, w: 65, h: 85, icon: '右', compId: 'p2_nt_r_1', label: '右柱右雀替' }
+    );
+    stepIds.push('p2_nt_l_0', 'p2_nt_r_0', 'p2_nt_l_1', 'p2_nt_r_1');
+    updateGuideStepText('第 4 步 · 装雀替', '将四个雀替分别拖到每根柱子顶端左右两侧。');
+  } else if (g.step === 5) {
+    // 步骤5：盖大屋檐（放大到900x320，位置再下移）
+    const targetX = cx - 450;
+    const targetY = cy - 190;
+    App.buildGuideTargets.push({
+      x: targetX, y: targetY, w: 900, h: 320, icon: '檐', compId: 'p2_wy_0', label: '大屋檐'
+    });
+    stepIds.push('p2_wy_0');
+    updateGuideStepText('第 5 步 · 盖屋檐', '将大屋檐拖到金色虚线框内，完成牌楼搭建！');
+  }
+
+  // 设置步骤所需构件
+  g.stepIds = stepIds;
+
+  updateBuildGuideVisibility();
+}
+
+function updateGuideStepText(step, desc) {
+  const stepEl = document.getElementById('bg-step-text');
+  const descEl = document.getElementById('bg-desc-text');
+  if (stepEl) stepEl.textContent = step;
+  if (descEl) descEl.textContent = desc;
+}
+
+function advanceGuideIfAllPlaced() {
+  const g = App.buildGuide;
+  if (!g) return;
+  const targets = App.buildGuideTargets;
+  const allPlaced = targets.every(tg => g.placedTargets.includes(tg.compId));
+  if (allPlaced) {
+    g.step++;
+    if (g.step > g.total) {
+      g.completed = true;
+      App.buildGuideTargets = [];
+      updateGuideStepText('完成！', '恭喜！你已成功搭建了一座传统牌楼！');
+      showHint('【搭建完成】一座传统牌楼已建成！点击任意构件可整体移动。', 4000);
+
+      // 把所有建筑构件加入同一个大组，可整体移动
+      const buildingIds = ['p2_zhu_2_0', 'p2_zhu_2_1', 'p2_zt_3', 'p2_my_3',
+                           'p2_nt_l_0', 'p2_nt_r_0', 'p2_nt_l_1', 'p2_nt_r_1', 'p2_wy_0'];
+      // 清理这些构件的旧组关系
+      for (const comp of App.components) {
+        if (buildingIds.includes(comp.id)) comp.groupId = null;
+      }
+      // 过滤掉包含这些构件的旧组
+      for (const gid in App.groups) {
+        App.groups[gid] = App.groups[gid].filter(id => !buildingIds.includes(id));
+        if (App.groups[gid].length === 0) delete App.groups[gid];
+      }
+      // 创建新的大组
+      const buildingGroupId = 'group_building_' + App.nextGroupId++;
+      App.groups[buildingGroupId] = [];
+      for (const id of buildingIds) {
+        const comp = App.components.find(c => c.id === id);
+        if (comp) {
+          comp.groupId = buildingGroupId;
+          App.groups[buildingGroupId].push(id);
+        }
+      }
+
+      setTimeout(() => {
+        const panel = document.getElementById('build-guide-panel');
+        if (panel) panel.style.display = 'none';
+        App.buildGuide = null;
+        for (const comp of App.components) comp.hidden = false;
+        const btn = document.getElementById('btn-build-guide');
+        if (btn) btn.style.display = 'inline-block';
+      }, 3000);
+    } else {
+      advanceBuildGuideStep();
+      showHint(`【搭建引导】进入第 ${g.step} 步！`, 2000);
+    }
+  } else {
+    const remaining = targets.filter(tg => !g.placedTargets.includes(tg.compId));
+    const nextLabel = remaining[0] ? remaining[0].label : '';
+    showHint(`【搭建引导】${nextLabel ? '请继续放置' + nextLabel : '请继续放置剩余构件'}`, 1800);
+  }
+}
+
+function checkBuildGuidePlacement(comp) {
+  const g = App.buildGuide;
+  if (!g) return false;
+
+  // 步骤3特殊处理：必须拖拽已拼接好的横梁组才能放置
+  // 单独放直榫或直卯时，只触发匹配检测，不触发目标框检测
+  if (g.step === 3) {
+    const isMatchedGroup = comp.matched && comp.groupId &&
+      App.groups[comp.groupId] &&
+      App.groups[comp.groupId].length >= 2;
+    if (!isMatchedGroup) return false;
+
+    // 步骤3用组中心检测：计算拼接后整体中心到目标框中心的距离
+    const group = App.groups[comp.groupId];
+    const members = group.map(id => App.components.find(c => c.id === id)).filter(Boolean);
+    const groupCenterX = members.reduce((s, m) => s + m.x, 0) / members.length;
+    const groupCenterY = members.reduce((s, m) => s + m.y, 0) / members.length;
+
+    const targets = App.buildGuideTargets;
+    const t = targets[0]; // 步骤3只有一个目标
+    if (!t || g.placedTargets.includes(t.compId)) return false;
+
+    const tx = t.x + t.w / 2;
+    const ty = t.y + t.h / 2;
+    const dist = Math.sqrt((groupCenterX - tx) ** 2 + (groupCenterY - ty) ** 2);
+    const tolerance = Math.max(t.w, t.h) * 1.0;
+
+    if (dist < tolerance) {
+      // 计算组中心到目标中心的偏移量
+      const dx = tx - groupCenterX;
+      const dy = ty - groupCenterY;
+
+      // 整组按偏移量移动，保持相对位置不变
+      for (const member of members) {
+        member.x += dx;
+        member.y += dy;
+      }
+
+      g.placedTargets.push(t.compId);
+      showHint(`【✓】${t.label} 放置完成！`, 1800);
+      advanceGuideIfAllPlaced();
+      return true;
+    }
+    return false;
+  }
+
+  // 步骤4保险：雀替已吸附到柱子即视为已放置，不依赖距离检测
+  if (g.step === 4 && comp.type === 'bracket' && comp.matched) {
+    const t = App.buildGuideTargets.find(tg => tg.compId === comp.id);
+    if (t && !g.placedTargets.includes(comp.id)) {
+      g.placedTargets.push(comp.id);
+      showHint(`【✓】${t.label} 放置完成！`, 1800);
+      advanceGuideIfAllPlaced();
+      return true;
+    }
+    return false;
+  }
+
+  // 非步骤3/4：原有逻辑
+  const targets = App.buildGuideTargets;
+  for (const t of targets) {
+    // 确定匹配的构件：可能是拖动构件本身，也可能是组内的其他成员
+    let matchedComp = comp;
+    if (comp.id !== t.compId && comp.groupId && App.groups[comp.groupId]) {
+      const matchedId = App.groups[comp.groupId].find(mid => mid === t.compId);
+      if (matchedId) {
+        matchedComp = App.components.find(c => c.id === matchedId);
+        if (!matchedComp) continue;
+      }
+    }
+
+    if (matchedComp.id !== t.compId) continue;
+    // 避免重复放置
+    if (g.placedTargets.includes(t.compId)) return false;
+
+    // 检查是否在目标范围内（以匹配构件的中心检测）
+      // 注意：matchedComp.x/y 已经是构件中心点坐标
+      const ccx = matchedComp.x;
+      const ccy = matchedComp.y;
+      const tx = t.x + t.w / 2;
+      const ty = t.y + t.h / 2;
+      const dist = Math.sqrt((ccx - tx) ** 2 + (ccy - ty) ** 2);
+      const tolerance = Math.max(t.w, t.h) * 0.8;
+
+    if (dist < tolerance) {
+      // 计算偏移量（匹配构件中心 → 目标中心）
+      const dx = tx - matchedComp.x;
+      const dy = ty - matchedComp.y;
+
+      // 吸附匹配构件到目标位置（构件坐标是中心点，目标框坐标是左上角，需对齐中心点）
+      matchedComp.x = t.x + t.w / 2;
+      matchedComp.y = t.y + t.h / 2;
+
+      // 如果是组拖动，组内所有成员按相同偏移移动，防止折叠
+      if (matchedComp.groupId && App.groups[matchedComp.groupId]) {
+        for (const memberId of App.groups[matchedComp.groupId]) {
+          const member = App.components.find(c => c.id === memberId);
+          if (member && member !== matchedComp) {
+            member.x += dx;
+            member.y += dy;
+          }
+        }
+      }
+
+      g.placedTargets.push(t.compId);
+      showHint(`【✓】${t.label} 放置完成！`, 1800);
+
+      advanceGuideIfAllPlaced();
+      return true;
+    }
+  }
+  return false;
+}
+
+// ========== 插画导出（PNG） ==========
+function exportSVG() {
+  const exportW = 1920;
+  const exportH = 1080;
+
+  // 创建导出专用 canvas
+  const exportCanvas = document.createElement('canvas');
+  exportCanvas.width = exportW;
+  exportCanvas.height = exportH;
+  const ctx = exportCanvas.getContext('2d');
+
+  // 背景
+  ctx.fillStyle = '#f4f1ea';
+  ctx.fillRect(0, 0, exportW, exportH);
+
+  // 计算居中偏移
+  const offsetX = (exportW - App.width) / 2;
+  const offsetY = (exportH - App.height) / 2;
+
+  // 保存当前交互状态，避免 hover/drag 效果混入导出图
+  const savedHover = App.hoverComponent;
+  const savedDrag = App.draggingComponent;
+  const savedPaintDrag = App.draggingPaint;
+  App.hoverComponent = null;
+  App.draggingComponent = null;
+  App.draggingPaint = null;
+
+  // 绘制每个构件
+  for (const comp of App.components) {
+    const savedX = comp.x;
+    const savedY = comp.y;
+    comp.x = savedX + offsetX;
+    comp.y = savedY + offsetY;
+    drawComponent(ctx, comp);
+    comp.x = savedX;
+    comp.y = savedY;
+  }
+
+  // 恢复交互状态
+  App.hoverComponent = savedHover;
+  App.draggingComponent = savedDrag;
+  App.draggingPaint = savedPaintDrag;
+
   // 标题
-  svg += `<text x="${w/2}" y="60" text-anchor="middle" fill="#2b2118" font-size="32" font-weight="bold" font-family="serif">榫合万象</text>`;
-  svg += `<text x="${w/2}" y="90" text-anchor="middle" fill="#8c7e6d" font-size="14">营造值：${App.score} | 已解锁彩画：${App.unlockedPatterns.length}</text>`;
+  ctx.fillStyle = '#2b2118';
+  ctx.font = 'bold 32px "Noto Serif SC", serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillText('榫合万象', exportW / 2, 60);
 
-  svg += `</svg>`;
+  ctx.fillStyle = '#8c7e6d';
+  ctx.font = '14px "Noto Serif SC", serif';
+  ctx.fillText(`营造值：${App.score} | 已解锁彩画：${App.unlockedPatterns.length}`, exportW / 2, 90);
 
-  const blob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' });
-  const url = URL.createObjectURL(blob);
+  // 导出 PNG
+  const url = exportCanvas.toDataURL('image/png');
   const a = document.createElement('a');
   a.href = url;
-  a.download = `榫合万象_${new Date().toLocaleDateString().replace(/\//g, '-')}.svg`;
+  a.download = `Mortise-Cosmos_${new Date().toLocaleDateString().replace(/\//g, '-')}.png`;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
-  URL.revokeObjectURL(url);
 
-  showHint('插画已导出为SVG文件');
+  showHint('插画已导出为PNG文件');
 }
 
 // ========== 键盘快捷键 ==========

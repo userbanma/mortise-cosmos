@@ -1,10 +1,11 @@
-# 依赖目录（可通过 npm install 重建）
+# 依赖目录
 node_modules/
 
 # Python 缓存
 __pycache__/
 *.pyc
 *.pyo
+*.pyd
 
 # 操作系统文件
 .DS_Store
@@ -13,6 +14,16 @@ Thumbs.db
 # 编辑器配置
 .vscode/
 .idea/
+*.swp
+*.swo
 
 # 日志文件
 *.log
+
+# 构建产物
+dist/
+build/
+
+# 临时文件
+*.tmp
+*.bak

@@ -3,47 +3,22 @@
 """
 榫合万象 - 本地启动服务器
 用 Python 内置 http.server 启动项目，解决 MediaPipe WASM 文件加载问题
-作者: [你的名字]
-课程: AI应用素养
+使用 config.py 管理配置，handler.py 管理请求处理逻辑
 """
 
-import http.server
 import socketserver
 import webbrowser
 import os
 import sys
-
-# 配置
-PORT = 8081
-DIRECTORY = os.path.dirname(os.path.abspath(__file__))
-
-
-class CustomHandler(http.server.SimpleHTTPRequestHandler):
-    """自定义请求处理器，支持跨域加载 WASM 文件"""
-
-    def end_headers(self):
-        # 允许跨域加载 WASM（MediaPipe 需要）
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Cross-Origin-Embedder-Policy", "require-corp")
-        self.send_header("Cross-Origin-Opener-Policy", "same-origin")
-        super().end_headers()
-
-    def guess_type(self, path):
-        # 确保 .wasm 文件使用正确的 MIME 类型
-        if path.endswith(".wasm"):
-            return "application/wasm"
-        return super().guess_type(path)
-
-    def log_message(self, format, *args):
-        # 简化日志输出
-        print(f"  [{self.log_date_time_string()}] {args[0]}")
+from config import HOST, PORT, DIRECTORY
+from handler import CustomHandler
 
 
 def start_server():
     """启动本地服务器并自动打开浏览器"""
     os.chdir(DIRECTORY)
 
-    with socketserver.TCPServer(("", PORT), CustomHandler) as httpd:
+    with socketserver.TCPServer((HOST, PORT), CustomHandler) as httpd:
         url = f"http://localhost:{PORT}/"
         print("=" * 50)
         print("  榫合万象 - 平面古建营造交互作品")

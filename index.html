@@ -4,249 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>榫合万象 - 平面古建营造交互作品</title>
-  <style>
-    /* === 基础重置 === */
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body {
-      font-family: "Noto Serif SC", "PingFang SC", "Microsoft YaHei", serif;
-      background: #2b2118;
-      overflow: hidden;
-      width: 100vw;
-      height: 100vh;
-    }
-
-    /* === 摄像头背景层 === */
-    #camera-layer {
-      position: absolute;
-      top: 0; left: 0;
-      width: 100%; height: 100%;
-      z-index: 1;
-    }
-    #camera-video {
-      width: 100vw; height: 100vh;
-      object-fit: cover;
-      opacity: 0.25;
-      filter: sepia(0.3) contrast(1.1);
-      transform: scaleX(-1); /* 左右翻转摄像头画面 */
-    }
-
-    /* === 主画布层 === */
-    #main-canvas {
-      position: absolute;
-      top: 0; left: 0;
-      width: 100%; height: 100%;
-      z-index: 2;
-    }
-
-    /* === UI层 === */
-    #ui-layer {
-      position: absolute;
-      top: 0; left: 0;
-      width: 100%; height: 100%;
-      z-index: 10;
-      pointer-events: none;
-    }
-    #ui-layer > * { pointer-events: auto; }
-
-    /* 标题 */
-    .title-bar {
-      position: absolute;
-      top: 20px; left: 50%;
-      transform: translateX(-50%);
-      text-align: center;
-      color: #d4c9b8;
-    }
-    .title-bar h1 {
-      font-size: 1.8rem;
-      letter-spacing: 0.3em;
-      font-weight: 700;
-      text-shadow: 0 2px 8px rgba(0,0,0,0.6);
-    }
-    .title-bar p {
-      font-size: 0.85rem;
-      color: #8c7e6d;
-      margin-top: 4px;
-      letter-spacing: 0.1em;
-    }
-
-    /* 营造值面板 */
-    .score-panel {
-      position: absolute;
-      top: 20px; right: 24px;
-      background: rgba(43, 33, 24, 0.85);
-      border: 1px solid #5c4033;
-      border-radius: 8px;
-      padding: 12px 20px;
-      color: #d4c9b8;
-      min-width: 140px;
-    }
-    .score-panel .label {
-      font-size: 0.75rem;
-      color: #8c7e6d;
-      margin-bottom: 4px;
-    }
-    .score-panel .value {
-      font-size: 1.6rem;
-      font-weight: 700;
-      color: #c4a574;
-    }
-
-    /* 阶段教程面板 */
-    .guide-panel {
-      position: absolute;
-      top: 80px; left: 20px;
-      background: rgba(43, 33, 24, 0.85);
-      border: 1px solid #5c4033;
-      border-radius: 8px;
-      padding: 12px 16px;
-      color: #d4c9b8;
-      max-width: 200px;
-      font-size: 0.8rem;
-      line-height: 1.7;
-    }
-    .guide-panel .stage-title {
-      font-size: 0.9rem;
-      font-weight: 700;
-      color: #c4a574;
-      margin-bottom: 6px;
-      letter-spacing: 0.1em;
-    }
-    .guide-panel .task {
-      color: #d4c9b8;
-      margin-bottom: 8px;
-    }
-    .guide-panel .divider {
-      border: none;
-      border-top: 1px solid #5c4033;
-      margin: 8px 0;
-    }
-    .guide-panel .controls {
-      font-size: 0.75rem;
-      color: #8c7e6d;
-    }
-    .guide-panel .controls strong {
-      color: #a08060;
-    }
-
-    /* 底部按钮栏 */
-    .bottom-bar {
-      position: absolute;
-      bottom: 24px;
-      left: 50%;
-      transform: translateX(-50%);
-      display: flex;
-      gap: 12px;
-    }
-    .btn {
-      background: rgba(43, 33, 24, 0.9);
-      border: 1px solid #8b7355;
-      color: #d4c9b8;
-      padding: 10px 24px;
-      border-radius: 6px;
-      cursor: pointer;
-      font-family: inherit;
-      font-size: 0.9rem;
-      transition: all 0.2s;
-      letter-spacing: 0.05em;
-    }
-    .btn:hover {
-      background: #5c4033;
-      border-color: #c4a574;
-      color: #fff;
-    }
-    .btn.primary {
-      background: #8b4513;
-      border-color: #a0522d;
-      color: #fff;
-    }
-    .btn.primary:hover {
-      background: #a0522d;
-    }
-
-    /* 提示信息 */
-    .hint-box {
-      position: absolute;
-      bottom: 80px;
-      left: 50%;
-      transform: translateX(-50%);
-      background: rgba(43, 33, 24, 0.9);
-      border: 1px solid #5c4033;
-      border-radius: 8px;
-      padding: 12px 24px;
-      color: #d4c9b8;
-      font-size: 0.9rem;
-      max-width: 600px;
-      text-align: center;
-      opacity: 0;
-      transition: opacity 0.5s;
-      word-wrap: break-word;
-      white-space: normal;
-      line-height: 1.6;
-      overflow-wrap: break-word;
-    }
-    .hint-box.show { opacity: 1; }
-
-    /* 启动遮罩 */
-    #start-overlay {
-      position: absolute;
-      top: 0; left: 0;
-      width: 100%; height: 100%;
-      background: rgba(43, 33, 24, 0.95);
-      z-index: 100;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      pointer-events: auto;
-    }
-    #start-overlay h2 {
-      color: #c4a574;
-      font-size: 2rem;
-      letter-spacing: 0.3em;
-      margin-bottom: 12px;
-    }
-    #start-overlay p {
-      color: #8c7e6d;
-      font-size: 1rem;
-      margin-bottom: 32px;
-      text-align: center;
-      line-height: 1.8;
-    }
-    #start-overlay .start-btn {
-      background: #8b4513;
-      color: #fff;
-      border: none;
-      padding: 14px 48px;
-      font-size: 1.1rem;
-      border-radius: 8px;
-      cursor: pointer;
-      font-family: inherit;
-      letter-spacing: 0.2em;
-      transition: background 0.3s;
-    }
-    #start-overlay .start-btn:hover {
-      background: #a0522d;
-    }
-
-    /* 手势指示器 */
-    #hand-cursor {
-      position: absolute;
-      width: 24px; height: 24px;
-      border: 2px solid #c4a574;
-      border-radius: 50%;
-      background: rgba(196, 165, 116, 0.3);
-      transform: translate(-50%, -50%);
-      pointer-events: none;
-      z-index: 20;
-      display: none;
-      transition: width 0.15s, height 0.15s;
-    }
-    #hand-cursor.pinching {
-      width: 16px; height: 16px;
-      background: rgba(196, 165, 116, 0.6);
-      border-color: #e8c97a;
-    }
-  </style>
+  <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
 
@@ -301,7 +59,16 @@
       <button class="btn" onclick="resetBuild()">重置</button>
       <button class="btn" onclick="toggleGuide()">营造图鉴</button>
       <button class="btn primary" id="btn-phase2" style="display:none" onclick="initPhase2()">自由搭建</button>
+      <button class="btn primary" id="btn-build-guide" style="display:none" onclick="startBuildGuide()">搭建引导</button>
       <button class="btn primary" onclick="exportSVG()">导出插画</button>
+    </div>
+
+    <!-- 搭建引导面板 -->
+    <div class="build-guide-panel" id="build-guide-panel" style="display:none">
+      <div class="bg-title">搭建引导</div>
+      <div class="bg-step" id="bg-step-text"></div>
+      <div class="bg-desc" id="bg-desc-text"></div>
+      <button class="btn" id="btn-bg-close" onclick="closeBuildGuide()" style="margin-top:8px;padding:6px 14px;font-size:0.75rem">退出引导</button>
     </div>
 
     <div class="hint-box" id="hint-box"></div>
@@ -312,6 +79,10 @@
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1675466862/camera_utils.js" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils@0.3.1675466124/drawing_utils.js" crossorigin="anonymous"></script>
+  <script src="js/state.js"></script>
+  <script src="js/components.js"></script>
+  <script src="js/gesture.js"></script>
+  <script src="js/rendering.js"></script>
   <script src="js/app.js"></script>
 </body>
 </html>
