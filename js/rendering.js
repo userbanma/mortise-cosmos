@@ -490,9 +490,12 @@ function updateHandCursor(x, y, pinching) {
 }
 
 // 在所有上层UI之后，单独绘制花纹覆盖层，确保不被引导框等半透明层遮盖
+// 按渲染顺序绘制：tenon → mortise → structure/bracket → eave，屋檐花纹在最上层
 function drawAllPatternOverlays(ctx) {
-  for (const comp of App.components) {
-    if (!comp.matched || !comp.painted || comp.hidden) continue;
+  const order = { tenon: 0, mortise: 1, structure: 2, bracket: 2, eave: 3 };
+  const painted = App.components.filter(c => c.matched && c.painted && !c.hidden);
+  painted.sort((a, b) => (order[a.type] || 0) - (order[b.type] || 0));
+  for (const comp of painted) {
     ctx.save();
     ctx.translate(comp.x, comp.y);
     ctx.rotate((comp.rotation * Math.PI) / 180);
