@@ -291,10 +291,15 @@ function triggerPointerUp() {
       }
 
       if (targetComp) {
-        // 给构件上色（设置painted属性和patternId）
-        targetComp.painted = true;
-        targetComp.paintPatternId = paint.patternId;
-        showHint(`【上色】${targetComp.name} 涂上了 ${paint.name}`, 2000);
+        // 雀替不上色
+        if (targetComp.type === 'bracket') {
+          showHint('雀替为透雕装饰构件，无需上色', 1500);
+        } else {
+          // 给构件上色（设置painted属性和patternId）
+          targetComp.painted = true;
+          targetComp.paintPatternId = paint.patternId;
+          showHint(`【上色】${targetComp.name} 涂上了 ${paint.name}`, 2000);
+        }
       } else {
         showHint('请将颜料拖到已嵌合的构件上', 1500);
       }
@@ -317,7 +322,10 @@ function triggerPointerUp() {
         showHint(`【移除】${comp.name} 已回收`, 1500);
       } else {
         // 放下时进行匹配检测
-        justMatched = checkMatchOnRelease(comp);
+        // 自由搭建阶段：未匹配的构件（榫/卯）可正常组合，已匹配的成组构件不再触发重新匹配
+        if (App.currentStage === 1 || App.buildGuide || !comp.matched) {
+          justMatched = checkMatchOnRelease(comp);
+        }
         // 如果刚发生了新匹配，跳过引导放置检测
         // 用户需要重新拾起拼好的组合件，拖到虚线框才算完成
         if (justMatched) {
@@ -446,6 +454,13 @@ function initPhase2() {
   updateScoreDisplay();
   updateGuidePanel();
 
+  initPhase2Components();
+
+  showHint('【阶段二 - 自由搭建】用各种构件自由搭建传统木构建筑！');
+}
+
+// 创建自由搭建阶段的构件（可从 initPhase2 和引导完成后复用）
+function initPhase2Components() {
   const cx = App.width / 2;
   const cy = App.height / 2;
 
@@ -458,7 +473,6 @@ function initPhase2() {
   ];
 
   const spacing = 90;
-  let idx = 0;
 
   sizes.forEach((sz, si) => {
     const baseY = cy - 180 + si * spacing;
@@ -543,7 +557,6 @@ function initPhase2() {
     }
   });
 
-
   // 雀替（左3份 + 右3份）
   const quetiLeftPositions = [
     { x: cx - 260, y: 145 },
@@ -580,7 +593,7 @@ function initPhase2() {
     });
   });
 
-  // 屋檐（大中小三种，已放大三倍）
+  // 屋檐（大中小三种）
   const wuSizes = [
     { name: '屋檐(大)', w: 900, h: 320, x: cx - 470, y: 80 },
     { name: '屋檐(中)', w: 540, h: 180, x: cx - 60, y: 75 },
@@ -598,8 +611,6 @@ function initPhase2() {
       color: '#7a5c3a', groupId: null,
     });
   });
-
-  showHint('【阶段二 - 自由搭建】用各种构件自由搭建传统木构建筑！');
 }
 
 function resetBuild() {
@@ -728,7 +739,7 @@ function createGuideComponents() {
     'p2_wy_0'
   ];
 
-  // 移除已有的同名构件（如果有）
+  // 移除已有的同名构件（自由搭建时可能已有）
   App.components = App.components.filter(c => !guideIds.includes(c.id));
 
   // 左柱
@@ -966,7 +977,11 @@ function advanceGuideIfAllPlaced() {
         const panel = document.getElementById('build-guide-panel');
         if (panel) panel.style.display = 'none';
         App.buildGuide = null;
-        for (const comp of App.components) comp.hidden = false;
+        // 保留引导搭建的建筑（已在同一个大组中，可整体移动）
+        // 恢复其他被隐藏的自由搭建构件
+        for (const comp of App.components) {
+          comp.hidden = false;
+        }
         const btn = document.getElementById('btn-build-guide');
         if (btn) btn.style.display = 'inline-block';
       }, 3000);

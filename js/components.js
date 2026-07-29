@@ -124,15 +124,22 @@ function getConnectionPoint(comp) {
 }
 
 function checkMatchOnRelease(comp) {
-  // 柱的特殊逻辑：可以吸附到已匹配的组合体上
-  if (comp.type === 'structure') {
-    checkColumnAttach(comp);
-    return false;
-  }
-
-  // 雀替的特殊逻辑：可以吸附到柱子顶端
-  if (comp.type === 'bracket') {
-    return checkBracketAttach(comp);
+  // 自由搭建模式（未开启引导）：柱、雀替、屋檐不可组合，仅榫卯可匹配
+  const isFreeMode = App.currentStage === 2 && !App.buildGuide;
+  if (isFreeMode) {
+    // 自由搭建模式下只允许榫卯匹配
+    if (comp.type === 'structure' || comp.type === 'bracket' || comp.type === 'eave') {
+      return false;
+    }
+  } else {
+    // 阶段一/搭建引导：柱可吸附到组合体，雀替可吸附到柱子
+    if (comp.type === 'structure') {
+      checkColumnAttach(comp);
+      return false;
+    }
+    if (comp.type === 'bracket') {
+      return checkBracketAttach(comp);
+    }
   }
 
   if (!comp.rules || comp.rules.mateWith.length === 0) return false;
@@ -202,27 +209,43 @@ function checkColumnAttach(column) {
     column.rotation = 0;
     column.matched = true;
 
-    // 把柱加入组
-    column.groupId = bestGroup;
-    App.groups[bestGroup].push(column.id);
+    // 如果柱子已有组（含雀替），把整组成员转移到横梁组
+    const oldGroupId = column.groupId;
+    if (oldGroupId && oldGroupId !== bestGroup && App.groups[oldGroupId]) {
+      for (const memberId of App.groups[oldGroupId]) {
+        const member = App.components.find(c => c.id === memberId);
+        if (member) {
+          member.groupId = bestGroup;
+          if (!App.groups[bestGroup].includes(memberId)) {
+            App.groups[bestGroup].push(memberId);
+          }
+        }
+      }
+      delete App.groups[oldGroupId];
+    } else if (!oldGroupId) {
+      // 柱子没有旧组，直接加入横梁组
+      column.groupId = bestGroup;
+      if (!App.groups[bestGroup].includes(column.id)) {
+        App.groups[bestGroup].push(column.id);
+      }
+    }
 
-    // 阶段一全部完成
-    App.task3Done = true;
-    App.phase1Done = true;
+    // 阶段一才触发完成逻辑
+    if (App.currentStage === 1) {
+      App.task3Done = true;
+      App.phase1Done = true;
+      App.score += 1;
+      updateScoreDisplay();
+      updateGuidePanel();
+      checkPatternUnlock();
+      const btn = document.getElementById('btn-phase2');
+      if (btn) btn.style.display = 'inline-block';
+      setTimeout(() => {
+        showHint('【阶段一完成】恭喜！点击底部"自由搭建"开始自由营造。', 6000);
+      }, 4500);
+    }
 
-    App.score += 1;
-    updateScoreDisplay();
-    updateGuidePanel();
     showHint(`【立柱】${column.name} 已立于梁下！一柱承梁，万事始兴。`, 4000);
-    checkPatternUnlock();
-
-    // 显示自由搭建按钮
-    const btn = document.getElementById('btn-phase2');
-    if (btn) btn.style.display = 'inline-block';
-
-    setTimeout(() => {
-      showHint('【阶段一完成】恭喜！点击底部"自由搭建"开始自由营造。', 6000);
-    }, 4500);
   }
 }
 function checkBracketAttach(bracket) {
@@ -272,8 +295,18 @@ function checkBracketAttach(bracket) {
   bracket.y = targetY;
   bracket.rotation = 0;
   bracket.matched = true;
-  // 雀替单独成组，不加入柱子组，避免柱子被连带移动
-  bracket.groupId = null;
+  // 雀替加入柱子的组，实现整体移动
+  if (bestColumn.groupId && App.groups[bestColumn.groupId]) {
+    // 柱子已有组，雀替加入同一组
+    bracket.groupId = bestColumn.groupId;
+    App.groups[bestColumn.groupId].push(bracket.id);
+  } else {
+    // 柱子没有组，创建新组把柱子和雀替放在一起
+    const newGroupId = 'group_bracket_' + App.nextGroupId++;
+    bracket.groupId = newGroupId;
+    bestColumn.groupId = newGroupId;
+    App.groups[newGroupId] = [bestColumn.id, bracket.id];
+  }
 
   const sideLabel = isLeftBracket ? '左侧' : '右侧';
   showHint(`【雀替】${bracket.name} 已装于 ${bestColumn.name}${sideLabel}！`, 2500);
@@ -596,17 +629,23 @@ function drawComponentBody(ctx, comp) {
   const w = comp.width;
   const h = comp.height;
   const id = comp.id;
-  if (id === 'zhitui_01' || id.startsWith('p2_zt_')) { drawTenonShape(ctx, w, h); }
-  else if (id === 'maoyan_01' || id.startsWith('p2_my_')) { drawMortiseShape(ctx, w, h); }
-  else if (id === 'yanwei_01' || id.startsWith('p2_yw_')) { drawDovetailTenonShape(ctx, w, h); }
-  else if (id === 'yanwei_mao_01' || id.startsWith('p2_ym_')) { drawDovetailMortiseShape(ctx, w, h); }
-  else if (id === 'zhu_01' || id.startsWith('p2_zhu_')) { drawColumnShape(ctx, w, h); }
-  else if (comp.type === 'bracket') {
+  // 使用 type 属性判断，不依赖 ID 前缀，确保引导阶段和自由搭建阶段的构件都能正确绘制
+  if (comp.type === 'tenon') {
+    if (id.includes('yanwei') || id.includes('yw_')) { drawDovetailTenonShape(ctx, w, h); }
+    else { drawTenonShape(ctx, w, h); }
+  } else if (comp.type === 'mortise') {
+    if (id.includes('yanwei') || id.includes('ym_')) { drawDovetailMortiseShape(ctx, w, h); }
+    else { drawMortiseShape(ctx, w, h); }
+  } else if (comp.type === 'structure') {
+    drawColumnShape(ctx, w, h);
+  } else if (comp.type === 'bracket') {
     const dir = comp.id.includes('_l_') ? -1 : 1;
     drawBracketShape(ctx, w, h, dir);
+  } else if (comp.type === 'eave') {
+    drawEaveShape(ctx, w, h);
+  } else {
+    roundRect(ctx, -w/2, -h/2, w, h, 4);
   }
-  else if (comp.type === 'eave') { drawEaveShape(ctx, w, h); }
-  else { roundRect(ctx, -w/2, -h/2, w, h, 4); }
 }
 function drawComponent(ctx, comp) {
   ctx.save();
@@ -651,7 +690,7 @@ function drawComponent(ctx, comp) {
 
   // ===== 卯眼的"洞"可视化 =====
   ctx.shadowColor = 'transparent';
-  if (comp.id === 'maoyan_01' || comp.id.startsWith('p2_my_')) {
+  if (comp.type === 'mortise' && !comp.id.includes('yanwei') && !comp.id.includes('ym_')) {
     // 直卯眼：矩形凹槽在 mortise 左端，水平凹入
     // 与直榫头精确匹配：tLen = w*0.22, tH = h*0.5
     const grooveH = h * 0.5;    // 竖直高度 = 榫头高度
@@ -664,7 +703,7 @@ function drawComponent(ctx, comp) {
     ctx.lineWidth = 1;
     ctx.strokeRect(gX, gY, grooveD, grooveH);
   }
-  if (comp.id === 'yanwei_mao_01' || comp.id.startsWith('p2_ym_')) {
+  if (comp.type === 'mortise' && (comp.id.includes('yanwei') || comp.id.includes('ym_'))) {
     // 燕尾卯眼：梯形凹槽在 mortise 左端，水平凹入
     // 与燕尾榫头精确匹配：tLen = w*0.24, rootH = h*0.65（根部宽）, tipH = h*0.35（端部窄）
     // 凹槽入口窄（匹配端部窄），里面宽（匹配根部宽）
@@ -691,7 +730,7 @@ function drawComponent(ctx, comp) {
 
   // ===== 构件内部纹理细节 =====
   // 直榫：榫头与主体交界线 + 纵向木纹
-  if (comp.id === 'zhitui_01' || comp.id.startsWith('p2_zt_')) {
+  if (comp.type === 'tenon' && !comp.id.includes('yanwei') && !comp.id.includes('yw_')) {
     ctx.strokeStyle = 'rgba(43,33,24,0.15)';
     ctx.lineWidth = 1;
     const bodyRight = w * 0.25;
@@ -708,7 +747,7 @@ function drawComponent(ctx, comp) {
   }
 
   // 卯眼：纵向木纹
-  if (comp.id === 'maoyan_01' || comp.id.startsWith('p2_my_')) {
+  if (comp.type === 'mortise' && !comp.id.includes('yanwei') && !comp.id.includes('ym_')) {
     ctx.strokeStyle = 'rgba(43,33,24,0.12)';
     ctx.lineWidth = 1;
     for (let i = -2; i <= 2; i++) {
@@ -722,7 +761,7 @@ function drawComponent(ctx, comp) {
   }
 
   // 燕尾榫：交界线 + 纵向木纹
-  if (comp.id === 'yanwei_01' || comp.id.startsWith('p2_yw_')) {
+  if (comp.type === 'tenon' && (comp.id.includes('yanwei') || comp.id.includes('yw_'))) {
     ctx.strokeStyle = 'rgba(43,33,24,0.15)';
     ctx.lineWidth = 1;
     const bodyRight = w * 0.22;
@@ -739,7 +778,7 @@ function drawComponent(ctx, comp) {
   }
 
   // 燕尾卯：木纹
-  if (comp.id === 'yanwei_mao_01' || comp.id.startsWith('p2_ym_')) {
+  if (comp.type === 'mortise' && (comp.id.includes('yanwei') || comp.id.includes('ym_'))) {
     ctx.strokeStyle = 'rgba(43,33,24,0.12)';
     ctx.lineWidth = 1;
     for (let i = -2; i <= 2; i++) {
